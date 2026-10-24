@@ -10,6 +10,7 @@ import { psProc, COMMAND_DISCOVER_TIMEOUT_MS } from './probe.mjs';
 import { resolveExe, newRunId, RUN_LOG_MAX_BYTES } from './desc.mjs';
 import { archiveCurrent, writeRuntime, isUnresolvedPhase } from './runtime.mjs';
 import { readStderrTailSafe } from './logs.mjs';
+import { prepareLaunchEnv, envWarningMessage } from './env.mjs';
 import { conflictError } from './errors.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -53,6 +54,9 @@ export function cleanupWrapper(rt) {
 }
 
 export async function launchManaged(home, appId, app, opts = {}) {
+  // 环境校验/解析必须先于日志目录、旧账归档与 STARTING 落盘：ENV_MISSING 或
+  // envFile 不可读时拒绝带病启动，且不改变既有运行证据。envFile 值只在内存。
+  const preparedEnv = opts.preparedEnv ?? prepareLaunchEnv(app);
   const runId = newRunId();
   const logDir = path.join(home, 'logs', appId);
   fs.mkdirSync(logDir, { recursive: true });
@@ -73,7 +77,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
     intentAt: new Date().toISOString(), startedAt: null,
     pid: null, creationFileTime: null, image: null,
     wrapperPid: null, wrapperCreationFileTime: null, wrapperImage: null, loggerPid: null,
-    envResolved: (app.envRefs ?? []).filter((n) => n in process.env),
+    envResolved: preparedEnv.envResolved,
     logPaths: { stdout: outPath, stderr: errPath },
     lastError: null, endedAt: null, exitNote: null,
   };
@@ -108,7 +112,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       cwd: app.cwd, detached: true, windowsHide: true,
       // env 只在内存中合并传给 logger（不写入落盘的 sink 配置，避免把环境变量落成文件）。
       stdio: 'ignore',
-      env: { ...process.env, ...(app.env ?? {}) },
+      env: preparedEnv.env,
     });
     child.unref();
   } catch (e) {
@@ -191,7 +195,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.image = cap.image;
       captureLoggerCreationFileTime(rt.current); // 目标核验后再采：多一次 pwsh 也不挤占启动热路径
       writeRuntime(home, appId, rt);
-      return rt.current;
+      return { ...rt.current, ...(preparedEnv.warnings.length ? { envWarnings: preparedEnv.warnings, envWarning: envWarningMessage(preparedEnv.warnings) } : {}) };
     }
     rt.current.phase = 'UNKNOWN';
     rt.current.lastError = `identity_capture_failed: ${JSON.stringify(cap)}${spawnError ? `; spawn_error: ${spawnError.code ?? spawnError.message}` : ''}`;
@@ -226,7 +230,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.image = t.image;
       captureLoggerCreationFileTime(rt.current);
       writeRuntime(home, appId, rt);
-      return rt.current;
+      return { ...rt.current, ...(preparedEnv.warnings.length ? { envWarnings: preparedEnv.warnings, envWarning: envWarningMessage(preparedEnv.warnings) } : {}) };
     }
     rt.current.phase = 'UNKNOWN';
     rt.current.lastError = `identity_capture_failed(target=${d.candidates[0].pid}): ${JSON.stringify(t)}`;

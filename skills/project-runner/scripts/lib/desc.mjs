@@ -69,6 +69,7 @@ export function loadManagedDesc(file) {
   if (d.discoverTimeoutMs != null && (!Number.isInteger(d.discoverTimeoutMs) || d.discoverTimeoutMs < 1000 || d.discoverTimeoutMs > 120000)) errs.push('discoverTimeoutMs 需为 1000-120000 整数');
   if (d.args != null && (!Array.isArray(d.args) || d.args.some((a) => typeof a !== 'string'))) errs.push('args 必须是字符串数组');
   if (d.envRefs != null && (!Array.isArray(d.envRefs) || d.envRefs.some((a) => typeof a !== 'string' || !ENV_NAME_RE.test(a)))) errs.push('envRefs 必须是合法环境变量名数组（仅名称，不含值）');
+  if (d.envFile != null && (typeof d.envFile !== 'string' || !d.envFile.trim())) errs.push('envFile 必须是非空字符串路径');
   if (d.env != null && (!d.env || typeof d.env !== 'object' || Array.isArray(d.env))) errs.push('env 必须是环境变量名到字符串值的对象');
   else if (d.env != null && Object.entries(d.env).some(([name, value]) => !ENV_NAME_RE.test(name) || typeof value !== 'string')) errs.push('env 的键必须是合法环境变量名，值必须是字符串');
   if (d.mode != null && !MODES.has(d.mode)) errs.push(`mode 只能是 ${[...MODES].join(' 或 ')}`);
@@ -96,6 +97,7 @@ export function loadManagedDesc(file) {
     expectedImage: d.expectedImage ?? null,
     discoverTimeoutMs: d.discoverTimeoutMs ?? null,
     envRefs: d.envRefs ?? [],
+    envFile: typeof d.envFile === 'string' ? d.envFile : null,
     env: d.env ?? {},
     expectedPort: Number.isInteger(d.expectedPort) ? d.expectedPort : null,
     readyLogPattern: d.readyLogPattern ?? null,
@@ -302,6 +304,7 @@ export function upsertApp(reg, appId, desc) {
     existing.expectedImage = desc.expectedImage ?? null;
     existing.discoverTimeoutMs = desc.discoverTimeoutMs ?? null;
     existing.envRefs = desc.envRefs;
+    existing.envFile = desc.envFile ?? null;
     existing.env = desc.env ?? {};
     existing.expectedPort = desc.expectedPort ?? null;
     existing.readyLogPattern = desc.readyLogPattern ?? null;
@@ -316,7 +319,8 @@ export function upsertApp(reg, appId, desc) {
     appId, alias: desc.alias, displayName: desc.displayName, root: desc.root, entry: desc.entry,
     cwd: desc.cwd, mode: desc.mode, exe: desc.exe, args: desc.args,
     command: desc.command ?? null, expectedImage: desc.expectedImage ?? null,
-    discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs, env: desc.env ?? {},
+    discoverTimeoutMs: desc.discoverTimeoutMs ?? null, envRefs: desc.envRefs,
+    envFile: desc.envFile ?? null, env: desc.env ?? {},
     expectedPort: desc.expectedPort ?? null, readyLogPattern: desc.readyLogPattern ?? null,
     readyUrl: desc.readyUrl ?? null, logMaxBytes: desc.logMaxBytes ?? RUN_LOG_MAX_BYTES,
     sourceFingerprint: desc.sourceFingerprint ?? null,

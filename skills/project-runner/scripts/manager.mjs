@@ -90,6 +90,12 @@ function emitErr(ctx, command, e) {
   }
 }
 
+function envWarnLine(names) {
+  return names?.length
+    ? `警告：env 中疑似机密字面值 ${names.join(', ')}（非阻断）；请改用 envRefs 或 envFile，status/ui 已对本类名称脱敏`
+    : null;
+}
+
 function renderHuman(command, data) {
   switch (command) {
     case 'version':
@@ -129,6 +135,7 @@ function renderHuman(command, data) {
       return [
         `已启动（受管）${data.alias} (${data.appId})`,
         `run=${data.runId} pid=${data.pid} status=${data.status}`,
+        envWarnLine(data.envWarnings),
         data.portEvidence?.forced ? data.portEvidence.note : null,
         data.abandonedRunId ? `已显式放弃未结记录 run=${data.abandonedRunId}（${data.abandonedReason}），证据保留在 prevRuns` : null,
         `stdout=${data.logPaths.stdout}`,
@@ -169,6 +176,7 @@ function renderHuman(command, data) {
     case 'restart':
       return [
         `restart ${data.alias}: stop=${data.stop.result} → start run=${data.start.runId} pid=${data.start.pid} status=${data.start.status}`,
+        envWarnLine(data.start.envWarnings),
         `stdout=${data.start.logPaths.stdout}`,
         data.start.portEvidence?.forced ? data.start.portEvidence.note : null,
         data.note ?? '',

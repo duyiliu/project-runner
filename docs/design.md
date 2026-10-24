@@ -62,7 +62,7 @@ Skill 安装副本可因 Agent 而不同，但都指向当前 Windows 用户下�
 
 - 一个仓库可有多个应用；按规范化仓库真实路径 + 应用入口去重，别名不区分 Windows 大小写。
 - 保留已经由 Skill 登记、但现在停止的项目；`list` 不等于“只列正在运行”。不再需要的登记由用户显式 `remove` 移除：仅允许无存活受管实例时移除（RUNNING 一律拒绝，STARTING/UNKNOWN 未结记录按既有 ack 流程）；只删注册表条目，`runtime/<appId>.json` 与 `logs/<appId>/` 证据保留，供事后追溯与 `prune` 按保留期回收。
-- desc 可包含 `env`（合法环境变量名到字符串字面值的映射），随应用配置明文持久化到 `registry.json`，启动时覆盖 manager 当前环境中的同名变量；`envRefs` 仍只记录依赖宿主提供的变量名，不存值。**`env` 禁止存放机密**（如密码、Token、许可证内容）；机密由系统环境变量提供并用 `envRefs` 声明。human/JSON 状态回显中的 env 值须截断；不存完整原始进程命令行或展开后的秘密。
+- desc 可包含 `env`（合法环境变量名到字符串字面值的映射），随应用配置明文持久化到 `registry.json`，启动时覆盖 manager 当前环境中的同名变量；`envRefs` 仍只记录依赖宿主提供的变量名，不存值。**`env` 禁止存放机密**（如密码、Token、许可证内容）；机密由系统环境变量提供并用 `envRefs` 声明，或用 `envFile` 指向本机 env 文件。启动前一次性校验 `envRefs`：任一变量缺失即以 `ENV_MISSING` 拒绝并列出全部缺失名称；`envFile` 仅启动时读取并注入内存（`KEY=VALUE`，值不写入 registry/runtime/status/UI），其文件本身不允许通过管理台浏览。`env` 中出现敏感名称（`SECRET|TOKEN|PASSWORD|PASSWD|KEY|CREDENTIAL` 等）或疑似凭据字面值时启动前告警但不阻断；human/JSON 状态与 UI 回显对敏感名称显示 `***`，非敏感 env 值保持截断行为。不存完整原始进程命令行或展开后的秘密。
 - 不使用别名拼接可信文件路径；`appId`、`runId` 由脚本生成且严格校验。原子写文件，冲突写入不覆盖。
 
 ### 2.2 本地 Web 管理台（manager ui，v1 只读）

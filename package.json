@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node skills/project-runner/scripts/test/log-rotation.mjs && node skills/project-runner/scripts/test/ui-smoke.mjs && node skills/project-runner/scripts/test/manager-smoke.mjs && node skills/project-runner/scripts/test/cli-smoke.mjs && node skills/project-runner/scripts/test/ui-src-follow.mjs && node skills/project-runner/scripts/test/runtime-smoke.mjs",
+    "test": "node skills/project-runner/scripts/test/log-rotation.mjs && node skills/project-runner/scripts/test/ui-smoke.mjs && node skills/project-runner/scripts/test/manager-smoke.mjs && node skills/project-runner/scripts/test/env-smoke.mjs && node skills/project-runner/scripts/test/cli-smoke.mjs && node skills/project-runner/scripts/test/ui-src-follow.mjs && node skills/project-runner/scripts/test/runtime-smoke.mjs",
     "check": "node -e \"const fs=require('fs'),p=require('path'),cp=require('child_process');const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(p.join(d,e.name)):[p.join(d,e.name)]);for(const f of walk('skills/project-runner/scripts').filter(x=>x.endsWith('.mjs')))cp.execFileSync(process.execPath,['--check',f],{stdio:'inherit'});console.log('syntax ok')\""
   }
 }

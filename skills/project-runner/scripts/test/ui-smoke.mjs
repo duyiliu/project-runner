@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { hasProcessProbe } from './platform.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-ui-smoke-'));
@@ -28,16 +29,19 @@ w(path.join(proj, '.tmp', 'jrebel-local-20261020-100000.stdout.log'), 'tmp line 
 w(path.join(proj, '.tmp', 'runner-local-20261021-100000.stderr.log'), 'tmp line B\n');
 w(path.join(proj, 'pom.xml'), '<project/>\n');
 w(path.join(proj, '.env'), 'SECRET=x\n');
+w(path.join(proj, 'app.env'), 'ENVFILE_SECRET=file-secret-value\n');
 fs.mkdirSync(path.join(proj, '.ssh'), { recursive: true });
 w(path.join(proj, '.ssh', 'id_ecdsa'), 'PRIVATE KEY\n');
 w(path.join(proj, '.npmrc'), '//registry.npmjs.org/:_authToken=secret\n');
 w(hintFile, 'hint 1\n');
 const root = fs.realpathSync(proj);
+// envFile 的硬链接别名与配置路径 realpath 不同、inode 相同：同样不允许浏览。
+fs.linkSync(path.join(proj, 'app.env'), path.join(proj, 'app.env.alias'));
 
 w(path.join(home, 'registry.json'), JSON.stringify({
   schemaVersion: 1,
   apps: {
-    ahis: { appId: 'ahis', alias: 'his', displayName: 'HIS', root, entry: 'default', cwd: root, mode: 'jrebel', exe: process.execPath, args: [], envRefs: [], expectedPort: 8080, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+    ahis: { appId: 'ahis', alias: 'his', displayName: 'HIS', root, entry: 'default', cwd: root, mode: 'jrebel', exe: process.execPath, args: [], envRefs: ['DB_PASSWORD'], env: { DB_PASSWORD: 'ui-secret-value', APP_MODE: 'fast' }, envFile: path.join(root, 'app.env'), expectedPort: 8080, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
     arep: { appId: 'arep', alias: 'report', displayName: '报表', root, entry: 'default', cwd: root, mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
     astuck: { appId: 'astuck', alias: 'stuck', displayName: '卡住的服务', root, entry: 'default', cwd: root, mode: 'jrebel', exe: process.execPath, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
     aghost: { appId: 'aghost', alias: 'ghost', displayName: '幽灵', root: path.join(base, 'missing-proj'), entry: 'default', cwd: path.join(base, 'missing-proj'), mode: 'java', exe: null, args: [], envRefs: [], expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
@@ -47,7 +51,7 @@ const rt = (id, cur, prev = []) => w(path.join(home, 'runtime', `${id}.json`), J
 const now = '2026-01-01T00:00:00Z';
 rt('ahis', {
   runId: 'rtest1', phase: 'STOPPED', managed: true, mode: 'jrebel', intentAt: now, startedAt: now,
-  pid: 99999, creationFileTime: '0', image: 'java.exe', envResolved: [],
+  pid: 99999, creationFileTime: '0', image: 'java.exe', envResolved: ['DB_PASSWORD'],
   logPaths: { stdout: path.join(home, 'logs', 'ahis', 'rtest1.stdout.log'), stderr: path.join(home, 'logs', 'ahis', 'rtest1.stderr.log') },
   lastError: null, endedAt: now, exitNote: 'smoke',
 }, [{ runId: 'rold1', phase: 'STOPPED', managed: true, startedAt: now, endedAt: now, archivedAt: now }]);
@@ -154,6 +158,13 @@ try {
     assert.equal(status.run.runId, 'rtest1');
     assert(status.run.logPaths.stdout.endsWith('rtest1.stdout.log'));
   });
+  await check('status 对敏感 env 名脱敏、非敏感 env 值保持，envRefs 仅名称', () => {
+    assert.equal(status.env.DB_PASSWORD, '***');
+    assert.equal(status.env.APP_MODE, 'fast');
+    assert(status.run.envResolved.includes('DB_PASSWORD'));
+    assert(!JSON.stringify(status).includes('ui-secret-value'), 'status/UI 接口回显了敏感 env 值');
+    assert(!JSON.stringify(status).includes('file-secret-value'), 'status/UI 接口回显了 envFile 值');
+  });
 
   const runs = (await get('/api/runs?app=his')).json.data;
   await check('批次列表（当前 + prevRuns）', () => {
@@ -196,15 +207,19 @@ try {
   });
 
   const tree = (await get('/api/tree?app=his&path=')).json.data;
-  await check('文件树：列出 pom.xml，隐藏 .env/.ssh/.npmrc', () => {
+  await check('文件树：列出 pom.xml，隐藏 .env/.ssh/.npmrc/envFile', () => {
     assert(tree.entries.some((e) => e.name === 'pom.xml'));
     assert(!tree.entries.some((e) => e.name === '.env'));
+    assert(!tree.entries.some((e) => e.name === 'app.env'), '配置的 envFile 不应出现在文件树');
+    assert(!tree.entries.some((e) => e.name === 'app.env.alias'), 'envFile 的硬链接别名不应出现在文件树');
     assert(!tree.entries.some((e) => e.name === '.ssh'));
     assert(!tree.entries.some((e) => e.name === '.npmrc'));
   });
   const file = (await get('/api/file?app=his&path=pom.xml')).json.data;
   await check('文件预览内容', () => assert(file.text.includes('<project/>')));
   await check('.env 拒绝（403）', async () => assert.equal((await get('/api/file?app=his&path=.env')).status, 403));
+  await check('配置的 envFile 拒绝浏览（403）', async () => assert.equal((await get('/api/file?app=his&path=app.env')).status, 403));
+  await check('envFile 硬链接别名同样拒绝浏览（403）', async () => assert.equal((await get('/api/file?app=his&path=app.env.alias')).status, 403));
   await check('.ssh/id_ecdsa 与 .npmrc 拒绝（403）', async () => {
     assert.equal((await get('/api/file?app=his&path=' + encodeURIComponent('.ssh/id_ecdsa'))).status, 403);
     assert.equal((await get('/api/file?app=his&path=' + encodeURIComponent('.npmrc'))).status, 403);
@@ -258,6 +273,35 @@ try {
     assert.equal(stuck.code, 3);
     assert(stuck.text.includes('UNRESOLVED_RUN'));
     assert(stuck.text.includes('--ack-unresolved'));
+  });
+
+  // UI 启停成功提示必须带出机密 env 告警（名称+建议，不含值）。
+  const regFile = path.join(home, 'registry.json');
+  const regNow = JSON.parse(fs.readFileSync(regFile, 'utf8'));
+  regNow.apps.aenvwarn = {
+    appId: 'aenvwarn', alias: 'envwarn', displayName: 'ENV WARN', root, entry: 'envwarn',
+    cwd: root, mode: 'node', exe: process.execPath, args: ['-e', 'setInterval(() => {}, 500)'],
+    envRefs: [], envFile: null, env: { DB_PASSWORD: 'ui-lifecycle-secret-value' },
+    expectedPort: null, sourceFingerprint: null, configRevision: 1, createdAt: now, updatedAt: now,
+  };
+  fs.writeFileSync(regFile, JSON.stringify(regNow, null, 2));
+  await check('管理台 lifecycle 启动透出 env 机密告警且不回显值', async () => {
+    if (!hasProcessProbe()) { console.log('  skip（缺进程探针，跳过生命周期告警检查）'); return; }
+    const headers = { 'Sec-Fetch-Site': 'same-origin', Origin: `http://127.0.0.1:${port}` };
+    let started = false;
+    try {
+      const r = await get('/api/lifecycle?app=envwarn&op=start', { method: 'POST', headers });
+      started = r.status === 200;
+      assert.equal(r.status, 200, r.body);
+      assert(r.json.data.envWarnings?.includes('DB_PASSWORD'), `缺少 env 告警：${r.body}`);
+      assert(r.json.data.envWarning?.includes('envRefs') && r.json.data.envWarning.includes('envFile'), `告警未提示 envRefs/envFile：${r.body}`);
+      assert(!r.body.includes('ui-lifecycle-secret-value'), 'lifecycle 响应回显了敏感 env 值');
+      // 页面脚本必须消费返回的告警并展示在成功提示中。
+      assert(page.body.includes('lifecycleEnvWarning(r)'), '页面未渲染 lifecycle env 告警');
+      assert(page.body.includes('· 警告：${envWarning}'), '页面成功提示未拼接 env 告警');
+    } finally {
+      if (started) await get('/api/lifecycle?app=envwarn&op=stop', { method: 'POST', headers });
+    }
   });
 } finally {
   child.kill();
