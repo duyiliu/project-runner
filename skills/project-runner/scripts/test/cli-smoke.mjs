@@ -199,6 +199,153 @@ await check('detect 缺 root 使用参数错误契约', async () => {
   assert.equal((await run(['detect', '--json'])).code, 1);
 });
 
+// ---------- detect 栈识别补齐：dev:* / 框架 / Python 依赖标记 / venv / Go / .NET ----------
+const detectMoreRoot = path.join(base, 'detect-more-fixtures');
+const devStarRoot = path.join(detectMoreRoot, 'dev-star-app');
+const poetryRoot = path.join(detectMoreRoot, 'poetry-app');
+const uvRoot = path.join(detectMoreRoot, 'uv-app');
+const venvRoot = path.join(detectMoreRoot, 'venv-app');
+const goRoot = path.join(detectMoreRoot, 'go-app');
+const dotnetRoot = path.join(detectMoreRoot, 'dotnet-app');
+const springProfileRoot = path.join(detectMoreRoot, 'spring-profile-app');
+const pipfileRoot = path.join(detectMoreRoot, 'pipfile-app');
+const setupPyRoot = path.join(detectMoreRoot, 'setup-py-app');
+const cargoRoot = path.join(detectMoreRoot, 'cargo-app');
+const composerRoot = path.join(detectMoreRoot, 'composer-app');
+const frameworkFixtures = [
+  ['react-app', 'react-scripts', 'start'],
+  ['svelte-app', '@sveltejs/kit', 'dev'],
+  ['astro-app', 'astro', 'dev'],
+];
+for (const d of [devStarRoot, poetryRoot, uvRoot, venvRoot, goRoot, dotnetRoot, springProfileRoot, pipfileRoot, setupPyRoot, cargoRoot, composerRoot, ...frameworkFixtures.map(([name]) => path.join(detectMoreRoot, name))]) fs.mkdirSync(d, { recursive: true });
+
+// pnpm + dev:*：脚本只在没有 dev/start/serve 时回退识别；.env.local 提供端口。
+w(path.join(devStarRoot, 'package.json'), JSON.stringify({ scripts: { 'dev:web': 'vite' }, devDependencies: { vite: '^6' }, packageManager: 'pnpm@9.0.0' }));
+w(path.join(devStarRoot, '.env.local'), 'PORT=4321\n');
+for (const [name, dep, script] of frameworkFixtures) {
+  const dir = path.join(detectMoreRoot, name);
+  w(path.join(dir, 'package.json'), JSON.stringify({ scripts: { [script]: `${dep} ${script}` }, dependencies: { [dep]: '1.0.0' } }));
+}
+// poetry：pyproject + poetry.lock + manage.py；同目录只应生成一个候选。
+w(path.join(poetryRoot, 'pyproject.toml'), '[tool.poetry]\nname = "poetry-app"\nversion = "0.1.0"\n[tool.poetry.dependencies]\npython = "^3.11"\ndjango = "^4"\n');
+w(path.join(poetryRoot, 'poetry.lock'), '[[package]]\nname = "django"\nversion = "4.2.0"\n');
+w(path.join(poetryRoot, 'manage.py'), 'import django\n');
+// uv：pyproject + uv.lock + FastAPI 入口。
+w(path.join(uvRoot, 'pyproject.toml'), '[project]\nname = "uv-app"\ndependencies = ["fastapi>=0.100"]\n');
+w(path.join(uvRoot, 'uv.lock'), 'name = "fastapi"\nversion = "0.100.0"\n');
+w(path.join(uvRoot, 'main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n');
+// .venv 存在时 Python 候选应使用项目内解释器。
+w(path.join(venvRoot, 'requirements.txt'), 'Flask==3.0\n');
+w(path.join(venvRoot, 'app.py'), 'app = None\n');
+const venvPython = isWindows ? path.join('.venv', 'Scripts', 'python.exe') : path.join('.venv', 'bin', 'python');
+fs.mkdirSync(path.dirname(path.join(venvRoot, venvPython)), { recursive: true });
+w(path.join(venvRoot, venvPython), '');
+// Go：go.mod + package main/func main 才给候选。
+w(path.join(goRoot, 'go.mod'), 'module example.com/goapp\n\ngo 1.22\n');
+w(path.join(goRoot, 'main.go'), 'package main\n\nfunc main() {}\n');
+// .NET：Web SDK 项目 → dotnet run。
+w(path.join(dotnetRoot, 'DotnetApp.csproj'), '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><AssemblyName>DotnetApp</AssemblyName></PropertyGroup></Project>\n');
+// Spring profile 端口：application-*.yml 也应作为端口证据。
+w(path.join(springProfileRoot, 'pom.xml'), '<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>');
+fs.mkdirSync(path.join(springProfileRoot, 'src/main/resources'), { recursive: true });
+w(path.join(springProfileRoot, 'src/main/resources/application-dev.yml'), 'server:\n  port: 9091\n');
+// Pipfile / setup.py 也是 Python 依赖证据。
+w(path.join(pipfileRoot, 'Pipfile'), '[packages]\ndjango = "*"\n');
+w(path.join(pipfileRoot, 'manage.py'), 'import django\n');
+w(path.join(setupPyRoot, 'setup.py'), 'from setuptools import setup\nsetup(name="setup-py-app", install_requires=["fastapi"])\n');
+w(path.join(setupPyRoot, 'main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n');
+// Rust / PHP：有真实入口的 Cargo 包与 Laravel artisan。
+w(path.join(cargoRoot, 'Cargo.toml'), '[package]\nname = "cargo-app"\nversion = "0.1.0"\n');
+fs.mkdirSync(path.join(cargoRoot, 'src'), { recursive: true });
+w(path.join(cargoRoot, 'src/main.rs'), 'fn main() {}\n');
+w(path.join(composerRoot, 'composer.json'), JSON.stringify({ require: { 'laravel/framework': '^10' } }));
+w(path.join(composerRoot, 'artisan'), '#!/usr/bin/env php\n');
+
+await check('detect 补齐 dev:*、前端框架、Python 依赖标记、venv、Go、.NET 与 profile 端口', async () => {
+  const r = await run(['detect', '--root', detectMoreRoot, '--json']);
+  assert.equal(r.code, 0, r.text);
+  const rows = r.json.data.candidates;
+  const inRoot = (dir) => rows.filter((x) => x.desc.root === dir);
+
+  const devStar = inRoot(devStarRoot);
+  assert.equal(devStar.length, 1, `pnpm dev:* 候选数：${devStar.length}`);
+  assert.equal(devStar[0].desc.command, 'pnpm run dev:web');
+  assert.match(devStar[0].evidence.rule, /package-script:dev:web/);
+  assert.match(devStar[0].evidence.rule, /dependency:vite/);
+  assert.match(devStar[0].evidence.rule, /pm:pnpm/);
+  assert.equal(devStar[0].desc.expectedPort, 4321);
+  assert.match(devStar[0].evidence.rule, /port:4321\(\.env\.local:PORT\)/);
+
+  for (const [name, dep] of frameworkFixtures) {
+    const dir = path.join(detectMoreRoot, name);
+    const found = inRoot(dir);
+    assert.equal(found.length, 1, `${name} 候选数：${found.length}`);
+    assert.equal(found[0].confidence, 'high');
+    assert.match(found[0].evidence.rule, new RegExp(`dependency:${dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  }
+
+  const poetry = inRoot(poetryRoot);
+  assert.equal(poetry.length, 1, `poetry 不应因 pyproject + poetry.lock 生成重复候选：${poetry.length}`);
+  assert.match(poetry[0].evidence.rule, /^django-manage\.py/);
+  assert.match(poetry[0].evidence.rule, /deps:poetry\.lock/);
+  assert.equal(poetry[0].desc.command, isWindows ? 'python manage.py runserver' : 'python3 manage.py runserver');
+
+  const uv = inRoot(uvRoot);
+  assert.equal(uv.length, 1, `uv 不应因 pyproject + uv.lock 生成重复候选：${uv.length}`);
+  assert.match(uv[0].evidence.rule, /^fastapi-uvicorn:main:app/);
+  assert.match(uv[0].evidence.rule, /deps:uv\.lock/);
+  assert.equal(uv[0].desc.command, isWindows ? 'python -m uvicorn main:app' : 'python3 -m uvicorn main:app');
+
+  const venv = inRoot(venvRoot);
+  assert.equal(venv.length, 1);
+  assert.equal(venv[0].desc.command, `${venvPython} -m flask --app app run`);
+  assert(venv[0].evidence.rule.includes('interpreter:venv(.venv'));
+
+  const go = inRoot(goRoot);
+  assert.equal(go.length, 1);
+  assert.equal(go[0].desc.command, 'go run .');
+  assert.equal(go[0].desc.mode, 'proc');
+  assert.equal(go[0].desc.expectedImage, `go-app${isWindows ? '.exe' : ''}`);
+  assert.match(go[0].evidence.rule, /^go-module:\.$/);
+
+  const dotnet = inRoot(dotnetRoot);
+  assert.equal(dotnet.length, 1);
+  assert.equal(dotnet[0].desc.command, 'dotnet run');
+  assert.equal(dotnet[0].desc.mode, 'proc');
+  assert.equal(dotnet[0].desc.expectedImage, `DotnetApp${isWindows ? '.exe' : ''}`);
+  assert.match(dotnet[0].evidence.rule, /^dotnet-csproj:web/);
+
+  const springProfile = inRoot(springProfileRoot);
+  assert.equal(springProfile.length, 1);
+  assert.equal(springProfile[0].desc.expectedPort, 9091);
+  assert.match(springProfile[0].evidence.rule, /application-dev\.yml:server\.port/);
+
+  const pipfile = inRoot(pipfileRoot);
+  assert.equal(pipfile.length, 1);
+  assert.match(pipfile[0].evidence.rule, /^django-manage\.py/);
+  assert.match(pipfile[0].evidence.rule, /deps:Pipfile/);
+
+  const setupPy = inRoot(setupPyRoot);
+  assert.equal(setupPy.length, 1);
+  assert.match(setupPy[0].evidence.rule, /^fastapi-uvicorn:main:app/);
+  assert.match(setupPy[0].evidence.rule, /deps:setup\.py/);
+
+  const cargo = inRoot(cargoRoot);
+  assert.equal(cargo.length, 1);
+  assert.equal(cargo[0].desc.command, 'cargo run');
+  assert.equal(cargo[0].desc.mode, 'proc');
+  assert.equal(cargo[0].desc.expectedImage, `cargo-app${isWindows ? '.exe' : ''}`);
+  assert.match(cargo[0].evidence.rule, /^cargo-package:cargo-app$/);
+
+  const composer = inRoot(composerRoot);
+  assert.equal(composer.length, 1);
+  assert.equal(composer[0].desc.command, 'php artisan serve');
+  assert.equal(composer[0].desc.mode, 'proc');
+  assert.equal(composer[0].desc.expectedImage, `php${isWindows ? '.exe' : ''}`);
+  assert.match(composer[0].evidence.rule, /^composer-laravel:artisan$/);
+  assert(rows.every((x) => x.confidence && x.evidence.file && x.evidence.rule));
+});
+
 // ---------- logs 统一日志源 ----------
 
 await check('list-sources：JSON 输出与 ui 同一数据（hint + .tmp + 批次）', async () => {
