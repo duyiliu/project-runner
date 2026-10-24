@@ -574,7 +574,7 @@ aside {
       <span class="badge" id="appCount">0</span>
       <button id="refreshBtn" class="icon-btn" type="button" title="刷新列表" aria-label="刷新列表"></button>
     </div>
-    <div class="app-search"><input id="appSearch" type="search" placeholder="过滤应用（别名/端口/路径）…" spellcheck="false" aria-label="过滤应用"></div>
+    <div class="app-search"><input id="appSearch" type="search" placeholder="过滤应用（别名/显示名/ID/端口/路径）…" spellcheck="false" aria-label="过滤应用"></div>
     <div id="appList" role="list"></div>
   </aside>
   <section class="detail-panel" aria-label="应用详情">
@@ -691,12 +691,15 @@ function handlePollError(e) {
 // ---------- 应用列表 ----------
 
 function statusPill(status) { return el('span', 'pill st-' + (status ?? 'UNKNOWN'), status ?? 'UNKNOWN'); }
+function appMatchesQuery(a, q) {
+  return !q || [a.alias, a.displayName, a.appId, a.mode, a.root, a.status, a.expectedPort].some(v => String(v ?? '').toLowerCase().includes(q));
+}
 function renderApps() {
   const list = $('#appList');
   const q = ($('#appSearch').value || '').trim().toLowerCase();
   const rank = { RUNNING: 0, STARTING: 1, UNKNOWN: 2, STOPPED: 3 };
   const filtered = appsCache
-    .filter(a => !q || [a.alias, a.displayName, a.mode, a.root, a.status, a.expectedPort].some(v => String(v ?? '').toLowerCase().includes(q)))
+    .filter(a => appMatchesQuery(a, q))
     .sort((x, y) => (rank[x.status] ?? 4) - (rank[y.status] ?? 4) || String(x.alias).localeCompare(String(y.alias)));
   $('#appCount').textContent = q ? `${filtered.length}/${appsCache.length}` : String(appsCache.length);
   const previousScroll = list.scrollTop;
@@ -736,7 +739,8 @@ function renderApps() {
     if (a.error) meta.appendChild(el('span', 'v bad', a.error));
     card.appendChild(meta);
     card.appendChild(el('div', 'app-root', a.root ?? ''));
-    card.title = a.error ? `${a.alias}：${a.error}` : `${a.alias} · ${a.appId}`;
+    const displayName = a.displayName && a.displayName !== a.alias ? ` · ${a.displayName}` : '';
+    card.title = a.error ? `${a.alias}${displayName}：${a.error}` : `${a.alias}${displayName} · ${a.appId}`;
     card.onclick = () => selectApp(a.alias);
     ordered.push(card);
   }

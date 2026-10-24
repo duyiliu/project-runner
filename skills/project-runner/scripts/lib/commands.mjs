@@ -304,10 +304,10 @@ export function cmdList(ctx) {
       if (cached instanceof Error) throw cached;
       ({ rt, st } = statusWithFacts(ctx.home, app.appId, prefetched.get(app.appId) ?? null, cached));
     } catch (e) {
-      return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
+      return { alias: app.alias, displayName: app.displayName ?? app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
     }
     return {
-      alias: app.alias, appId: app.appId, mode: app.mode,
+      alias: app.alias, displayName: app.displayName ?? app.alias, appId: app.appId, mode: app.mode,
       status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
       pid: st.status === 'RUNNING' ? (st.pid ?? rt?.current?.pid) : null,
       expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,

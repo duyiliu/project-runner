@@ -147,6 +147,18 @@ try {
   await check('受管 STOPPED 状态', () => assert.equal(apps.find((a) => a.alias === 'his').status, 'STOPPED'));
   await check('非受管 managed=false', () => assert.equal(apps.find((a) => a.alias === 'report').managed, false));
   await check('缺失目录应用 ghost 仍列出', () => assert(apps.some((a) => a.alias === 'ghost')));
+  await check('应用行含 displayName，且页面过滤可按显示名/appId 命中', () => {
+    assert.equal(apps.find((a) => a.alias === 'his').displayName, 'HIS');
+    assert.equal(apps.find((a) => a.alias === 'report').displayName, '报表');
+    const src = /function appMatchesQuery\(a, q\) \{[\s\S]*?\n\}/.exec(page.body);
+    assert(src, '页面缺少 appMatchesQuery（应用过滤逻辑）');
+    const matches = vm.runInNewContext(`(${src[0]})`);
+    const hit = (q) => apps.filter((a) => matches(a, q.toLowerCase())).map((a) => a.alias);
+    assert.deepEqual(hit('HIS'), ['his']);
+    assert.deepEqual(hit('报表'), ['report']);
+    assert.deepEqual(hit('arep'), ['report']);
+    assert.deepEqual(hit('卡住的服务'), ['stuck']);
+  });
 
   const status = (await get('/api/status?app=his')).json.data;
   await check('status 详情（runId/日志路径）', () => {
