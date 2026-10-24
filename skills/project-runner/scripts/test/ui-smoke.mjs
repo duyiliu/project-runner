@@ -79,7 +79,7 @@ const get = (p, { method = 'GET', host, headers: extra } = {}) => new Promise((r
   const r = http.request(url, { method, headers }, (rs) => {
     let b = '';
     rs.on('data', (d) => { b += d; });
-    rs.on('end', () => res({ status: rs.statusCode, body: b, json: (() => { try { return JSON.parse(b); } catch { return null; } })() }));
+    rs.on('end', () => res({ status: rs.statusCode, headers: rs.headers, body: b, json: (() => { try { return JSON.parse(b); } catch { return null; } })() }));
   });
   r.on('error', rej);
   r.end();
@@ -108,6 +108,15 @@ try {
   await check('启动横幅含 URL（无令牌，可收藏）', () => assert(banner.includes(`http://127.0.0.1:${port}/`) && !banner.includes('token=')));
 
   const page = await get('/');
+  await check('管理台页面含防点击劫持响应头', () => {
+    assert.equal(page.status, 200);
+    assert.equal(page.headers['x-frame-options'], 'DENY');
+    assert.equal(page.headers['content-security-policy'], "frame-ancestors 'none'");
+  });
+  await check('iframe 子资源请求被拒绝（403）', async () => {
+    const r = await get('/', { headers: { 'Sec-Fetch-Dest': 'iframe' } });
+    assert.equal(r.status, 403);
+  });
   await check('管理台页面含过滤输入框与只看错误开关', () => {
     assert.equal(page.status, 200);
     for (const marker of ['id="logFilter"', 'id="errorsBtn"', 'id="followBtn"']) {

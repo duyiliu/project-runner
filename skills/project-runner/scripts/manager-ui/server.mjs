@@ -51,7 +51,15 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
 
   async function route(res, u, method) {
     if (u.pathname === '/' || u.pathname === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      // 防点击劫持：管理台只允许本机用户直接访问，禁止被任意站点 iframe 嵌入
+      // （iframe 内点击与页面同源，CSRF 守卫无法区分）。仅加 frame-ancestors，避免
+      // 引入 default-src 破坏页面内联脚本。
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Frame-Options': 'DENY',
+        'Content-Security-Policy': "frame-ancestors 'none'",
+      });
       res.end(indexHtml());
       return;
     }
@@ -137,6 +145,10 @@ export async function startUiServer({ home, port = 0, open = false, api }) {
         return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: 'Host 不允许访问' } });
       }
       u = new URL(req.url, `http://127.0.0.1:${boundPort}`);
+      // 纵深防御：明确声明为 iframe 子资源的请求一律拒绝（浏览器正常直接访问为 document）。
+      if (String(req.headers['sec-fetch-dest'] ?? '').toLowerCase() === 'iframe') {
+        return sendJson(res, 403, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'FORBIDDEN', message: '禁止在 iframe 中访问管理台' } });
+      }
       if (req.method !== 'GET' && !(req.method === 'POST' && u.pathname === '/api/lifecycle')) {
         return sendJson(res, 405, { schemaVersion: SCHEMA_VERSION, ok: false, error: { code: 'METHOD', message: '仅支持 GET 与 POST /api/lifecycle' } });
       }
