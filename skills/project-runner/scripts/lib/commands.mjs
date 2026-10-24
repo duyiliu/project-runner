@@ -597,8 +597,9 @@ export function cmdCleanupWrapper(ctx, ref) {
     if (!Number.isInteger(cur.wrapperPid) || !cur.wrapperCreationFileTime || !cur.wrapperImage) {
       throw conflictError('IDENTITY_UNKNOWN', `runId=${cur.runId} 缺少完整 wrapper 身份证据，拒绝清理`, { runId: cur.runId, wrapperPid: cur.wrapperPid ?? null });
     }
-    // Linux 的 sh 可能 exec 成目标（image 改变但 starttime 不变）：先按记录核验
-    // starttime，再用当前 image 调 terminate，避免把 exec 误判为身份不符。
+    // Linux 的 sh 可能 exec 成目标（image 改变但 starttime 不变）：此时该 PID 已经是
+    // 目标候选而非 wrapper。必须同时核验创建时间与记录的 wrapper 映像，映像变化
+    // （含 exec）一律拒绝并留给人工核验，避免 cleanup-wrapper 误杀目标进程。
     let now;
     try { now = psProc('capture', { id: cur.wrapperPid }); }
     catch (e) { now = { result: 'error', message: e.message }; }
@@ -609,13 +610,18 @@ export function cmdCleanupWrapper(ctx, ref) {
       writeRuntime(ctx.home, appId, rt);
       return { appId, alias: app.alias, runId: cur.runId, wrapperPid: cur.wrapperPid, result: now.result, note: 'wrapper 已退出；UNKNOWN 证据保留' };
     }
-    if (now.result !== 'ok' || String(now.creationFileTime) !== String(cur.wrapperCreationFileTime)) {
-      throw conflictError('IDENTITY_UNKNOWN', `wrapper(pid=${cur.wrapperPid}) 身份与记录不一致，拒绝清理；未触碰任何进程`, { runId: cur.runId, wrapperPid: cur.wrapperPid, capture: now });
+    if (now.result !== 'ok'
+      || String(now.creationFileTime) !== String(cur.wrapperCreationFileTime)
+      || String(now.image) !== String(cur.wrapperImage)) {
+      throw conflictError('IDENTITY_UNKNOWN', `wrapper(pid=${cur.wrapperPid}) 身份与记录不一致（创建时间或映像已变，可能已 exec 成目标），拒绝清理；未触碰任何进程`, { runId: cur.runId, wrapperPid: cur.wrapperPid, recordedImage: cur.wrapperImage, capture: now });
     }
     let t;
-    try { t = psProc('terminate', { id: cur.wrapperPid, creationFileTime: now.creationFileTime, image: now.image }); }
+    try { t = psProc('terminate', { id: cur.wrapperPid, creationFileTime: now.creationFileTime, image: now.image, freeze: true }); }
     catch (e) { t = { result: 'error', message: e.message }; }
-    if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound' || t.result === 'mismatch') {
+    if (t.result === 'mismatch') {
+      throw conflictError('IDENTITY_UNKNOWN', `wrapper(pid=${cur.wrapperPid}) 在终止前身份发生变化（${t.field ?? 'unknown'}），拒绝清理且未标记完成；UNKNOWN 证据保留`, { runId: cur.runId, wrapperPid: cur.wrapperPid, detail: t });
+    }
+    if (t.result === 'terminated' || t.result === 'exited' || t.result === 'notfound') {
       cur.wrapperCleaned = true;
       cur.wrapperCleanupAt = new Date().toISOString();
       cur.wrapperCleanupResult = t.result;

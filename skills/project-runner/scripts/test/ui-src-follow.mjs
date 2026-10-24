@@ -249,6 +249,37 @@ try {
   await restartAndSync('rtest8');
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
 
+  await check('所有生命周期操作首次点击只进入确认态，二次点击才提交', async () => {
+    run(`globalThis.__lifecycleCalls = []; doLifecycle = (alias, op, extra = '') => { __lifecycleCalls.push({ alias, op, extra }); }; globalThis.__savedSelected = selected; selected = null;`);
+    const clickBtn = (btn) => btn.dispatch('click', { target: btn, stopPropagation() {} });
+    const cases = [
+      { name: '普通启动', label: '启动', op: 'start', extra: '', d: { status: 'STOPPED', managed: true, run: { runId: 'rtest8', phase: 'STOPPED', managed: true } } },
+      { name: '停止', label: '停止', op: 'stop', extra: '', d: { status: 'RUNNING', managed: true, run: { runId: 'rtest8', phase: 'RUNNING', managed: true } } },
+      { name: '重启', label: '重启', op: 'restart', extra: '', d: { status: 'RUNNING', managed: true, run: { runId: 'rtest8', phase: 'RUNNING', managed: true } } },
+      { name: 'ack 并启动', label: 'ack 并启动', op: 'start', extra: '&ack=ru1', d: { status: 'UNKNOWN', managed: true, run: { runId: 'ru1', phase: 'UNKNOWN', managed: true } } },
+      { name: '受管移除', label: '移除', op: 'remove', extra: '', d: { status: 'STOPPED', managed: true, run: { runId: 'rtest8', phase: 'STOPPED', managed: true } } },
+      { name: '非受管移除', label: '移除', op: 'remove', extra: '', d: { status: 'STOPPED', managed: false, run: { runId: 'rtest8', phase: 'STOPPED', managed: false } } },
+    ];
+    for (const c of cases) {
+      const detail = { alias: 'his', appId: 'ahis', mode: 'java', expectedPort: null, ...c.d };
+      run(`disarmOp(); __lifecycleCalls.length = 0; renderDetail(${JSON.stringify(detail)})`);
+      const findBtn = () => [...elFor('detailOps').querySelectorAll('.op-btn')].find((b) => b.textContent === c.label || b.textContent === `确认${c.label}`);
+      assert.equal(findBtn()?.textContent, c.label, `${c.name} 初始应为未确认态`);
+      clickBtn(findBtn());
+      assert.equal(run('__lifecycleCalls.length'), 0, `${c.name} 首次点击不应提交生命周期请求`);
+      assert.equal(run('armedOp'), `his:${c.op}:${c.extra}`, `${c.name} 首次点击应进入确认态`);
+      // 实际界面由轮询后的 renderDetail 重绘为确认态；这里显式重绘，避免依赖网络时序。
+      run(`renderDetail(${JSON.stringify(detail)})`);
+      assert.equal(findBtn()?.textContent, `确认${c.label}`, `${c.name} 重绘后应显示确认态`);
+      clickBtn(findBtn());
+      assert.equal(run('__lifecycleCalls.length'), 1, `${c.name} 二次点击应提交一次生命周期请求`);
+      assert.equal(run('__lifecycleCalls[0].alias'), 'his');
+      assert.equal(run('__lifecycleCalls[0].op'), c.op);
+      assert.equal(run('__lifecycleCalls[0].extra'), c.extra);
+      run('disarmOp()');
+    }
+    run('selected = __savedSelected;');
+  });
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
     run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);
     run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);

@@ -34,7 +34,7 @@ node skills/project-runner/scripts/manager.mjs logs runner-demo --lines 80
 node skills/project-runner/scripts/manager.mjs stop runner-demo
 ```
 
-`start` 人工模式默认拉起或复用全局只读管理台，默认端口 `8198`；端口冲突时可能回退随机端口，以实际输出为准。管理台 URL 需要令牌。`stop` 是身份核验后的强制终止，不承诺优雅关机。
+需要观察日志与项目文件时另运行 `manager ui`：默认固定 `http://127.0.0.1:8199`，无令牌仅本机可访问，页面可显式二次确认启停/移除受管应用。`stop` 是身份核验后的强制终止，不承诺优雅关机。
 
 ## 接口检查
 

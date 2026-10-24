@@ -1,6 +1,6 @@
 ---
 name: project-runner
-description: Agent 驱动的本地项目启动助手：识别并启动 Java/Spring Boot（含 standalone JRebel）、Python、Vue/React/Vite 等 Node 前端与其他主流栈项目，启动、查看日志并验证热更新。用户要求启动本地服务/项目、配置或排查 JRebel、查看运行日志、打开本地 Web 管理台（manager ui，默认固定 http://127.0.0.1:8199）时使用；跨项目运行管理与只读管理台（manager.mjs list/status/start/stop/restart/remove/prune/logs/ui）已实现，用法见第 8 章（详见 references/manager.md）。
+description: Agent 驱动的本地项目启动助手：识别并启动 Java/Spring Boot（含 standalone JRebel）、Python、Vue/React/Vite 等 Node 前端与其他主流栈项目，启动、查看日志并验证热更新。用户要求启动本地服务/项目、配置或排查 JRebel、查看运行日志、打开本地 Web 管理台（manager ui，默认固定 http://127.0.0.1:8199）时使用；跨项目运行管理与本机 Web 管理台（默认只读展示，启停/移除须页面显式二次确认；manager.mjs list/status/start/stop/restart/remove/prune/logs/ui）已实现，用法见第 8 章（详见 references/manager.md）。
 ---
 
 # Project Runner · 多语言项目启动 / Standalone JRebel 流程
@@ -124,9 +124,9 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
   node "<当前实际安装的 project-runner Skill 目录>/scripts/manager.mjs" ui [--port N]
   ```
   该命令前台常驻，须以 detached/后台方式拉起；管理台只绑 `127.0.0.1` 无令牌，`http://127.0.0.1:8199` 可直接收藏；若返回“已有 ui 实例占用”（退出码 3），复用该地址即可。启动前确认 `node --version` 可用。
-  打开 `http://127.0.0.1:8199`（或 `--port` 指定的端口）；`--open` 在监听成功后用默认浏览器打开该 URL（默认不开：Agent 前台拉起场景不期望弹浏览器；打开失败降级为仅打印 URL，不阻塞 ui）。左侧为已登记应用列表，右侧展示状态、未结记录证据与日志；日志源选择器统一覆盖受管批次（数据目录）、非受管登记线索与项目 `root/.tmp/jrebel-local-*` 兼容日志，默认优先当前批次 stdout，支持增量跟踪、正则过滤与「只看错误」开关（渲染层过滤，清空恢复，无效正则有提示）、着色与暂停续传。顶部"文件"打开所选应用的只读项目文件树与带行号文本预览（UTF-8 前 256KB，二进制仅显示元信息）。`?app=<别名>` 可直达单项目；页面中选择应用后地址会回写 `?app=`，刷新保持选中。日志与文件接口拒绝路径穿越、符号链接，隐藏 `.git`、`node_modules`、`.env*`、常见私钥与许可文件；不提供上传、修改、删除，不承担内容脱敏，仅绑 `127.0.0.1`，禁止对外网开放。8199 被占用时按启动提示复用已有实例或换 `--port`。
+  打开 `http://127.0.0.1:8199`（或 `--port` 指定的端口）；`--open` 在监听成功后用默认浏览器打开该 URL（默认不开：Agent 前台拉起场景不期望弹浏览器；打开失败降级为仅打印 URL，不阻塞 ui）。左侧为已登记应用列表，右侧展示状态、未结记录证据与日志；日志源选择器统一覆盖受管批次（数据目录）、非受管登记线索与项目 `root/.tmp/jrebel-local-*` 兼容日志，默认优先当前批次 stdout，支持增量跟踪、正则过滤与「只看错误」开关（渲染层过滤，清空恢复，无效正则有提示）、着色与暂停续传。顶部"文件"打开所选应用的只读项目文件树与带行号文本预览（UTF-8 前 256KB，二进制仅显示元信息）。详情卡可对本机受管应用执行启动/停止/重启/移除（页面二次确认，与 CLI 同一实现与安全边界；`stop` 是有界强制终止）；STARTING/UNKNOWN 在人工核验后可执行“ack 并启动”（同 `start --ack-unresolved`）。`?app=<别名>` 可直达单项目；页面中选择应用后地址会回写 `?app=`，刷新保持选中。日志与文件接口拒绝路径穿越、符号链接，隐藏 `.git`、`node_modules`、`.env*`、常见私钥与许可文件；不提供上传、修改、删除，不承担内容脱敏，仅绑 `127.0.0.1`，禁止对外网开放。8199 被占用时按启动提示复用已有实例或换 `--port`。
 
-  **适用范围**：管理台同时覆盖受管与非受管应用——非受管应用只能查看日志线索与 `.tmp` 兼容日志，不承诺生命周期控制。原单项目 viewer 已移除，其日志与文件树能力并入本台；若 Node 不可用，用下方命令行跟踪或 `manager logs`。
+  **适用范围**：管理台同时覆盖受管与非受管应用——非受管应用只能查看日志线索与 `.tmp` 兼容日志，不承诺启停，但 STOPPED 时可在页面移除登记（只删注册表条目，运行记录与日志证据保留）；原单项目 viewer 已移除，其日志与文件树能力并入本台；若 Node 不可用，用下方命令行跟踪或 `manager logs`。
 
   日志面板支持跟随/恢复跟随、清屏、正则过滤/只看错误与级别着色（JRebel/错误/警告/SQL），向上滚动自动停止跟随；日志仅缓存最近 8000 行，截断会显示提示，不是完整日志归档。文件抽屉扩大了本机可读范围：仅绑定 `127.0.0.1`，不要将端口代理或转发到局域网或公网；目录浏览的过滤不代表所有项目配置都已脱敏。仅本机可信用户使用。
 
@@ -159,4 +159,4 @@ Standalone JRebel 不依赖 IDE 插件。安装路径优先从进程/用户环�
 
 ## 8. 跨项目管理（manager.mjs，多项目/跨会话）
 
-跨项目管理的命令、数据、安全与恢复规程按需阅读 [manager 参考](references/manager.md)。常用启动路径：先识别项目并完成授权/安全检查，首次登记前先调用只读的 `manager.mjs detect --root <仓库根目录>` 取启动描述候选（只输出草案，不登记不启动），复核确认后再用 `manager.mjs start-new` 登记；之后 `list/status/start/stop/restart/logs` 管理已登记应用，网页观察入口为 `manager ui`。只操作本 Skill 启动并登记的应用，不接管 IDEA/手工进程；UNKNOWN/STARTING 未结记录不得绕过或删除。
+跨项目管理的命令、数据、安全与恢复规程按需阅读 [manager 参考](references/manager.md)。常用启动路径：先识别项目并完成授权/安全检查，首次登记前先调用只读的 `manager.mjs detect --root <仓库根目录>` 取启动描述候选（只输出草案，不登记不启动），复核确认后再用 `manager.mjs start-new` 登记；之后 `list/status/start/stop/restart/logs` 管理已登记应用，网页观察入口为 `manager ui`。只操作本 Skill 启动并登记的应用，不接管 IDEA/手工进程；UNKNOWN/STARTING 未结记录不得绕过或删除。命令模式失败留下 UNKNOWN 且 wrapper 身份证据完整时，可用 `cleanup-wrapper <别名|appId>` 只清理已记录的 wrapper；它不清理目标候选或后代，目标候选/后代须按进程证据人工核验处置，禁止把 UNKNOWN 当 STOPPED 重试。

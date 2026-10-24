@@ -564,7 +564,7 @@ aside {
   <div class="home-path" id="homePath"></div>
   <span class="conn" id="connState">连接中…</span>
 </header>
-<div class="banner warn" id="roBanner">本机管理台（仅 127.0.0.1，无令牌）：启停/ack/移除与 manager CLI 同一实现（仅本 Skill 登记的受管应用）；stop 是有界强制终止，不杀进程树。</div>
+<div class="banner warn" id="roBanner">本机管理台（仅 127.0.0.1，无令牌）：受管应用可启停/ack/移除，非受管应用仅可移除 STOPPED 登记且证据保留（均与 manager CLI 同一实现，操作需二次确认）；stop 是有界强制终止，不杀进程树。</div>
 <div class="banner" id="fatalBanner" hidden></div>
 <div class="banner warn" id="exitBanner" hidden></div>
 <main class="layout">
@@ -852,7 +852,7 @@ function renderDetail(d) {
     const makeOps = () => {
       const ops = el('span', 'op-group');
       const mk = (label, op, enabled, title, extra = '') => {
-        const needsConfirm = op !== 'start' || extra;
+        const needsConfirm = true; // 所有生命周期操作（含普通启动）都需二次点击确认
         const armed = armedOp === `${d.alias}:${op}:${extra}`;
         const running = lifecycleBusy && lifecycleOpKey === `${d.alias}:${op}:${extra}`;
         const b = el('button', 'op-btn' + (running ? ' busy' : armed ? ' armed' : ''), running ? `${label}中…` : armed ? `确认${label}` : label);
@@ -907,7 +907,7 @@ function renderDetail(d) {
   if (needsAttention) {
     const cmd = `start ${d.alias} --ack-unresolved ${run.runId}`;
     const alert = el('div', 'alert');
-    alert.append(el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后用 manager CLI 执行 `));
+    alert.append(el('span', null, `未结记录（phase=${run.phase}，runId=${run.runId}）：不会自动重试。请先人工核验该进程是否仍存活（本页与 logs 可查），确认退出后可点击本页“ack 并启动”（需再次点击确认），或用 manager CLI 执行 `));
     alert.appendChild(el('code', null, cmd));
     alert.appendChild(copyButton(cmd));
     alert.appendChild(el('span', null, ' 显式恢复。不要删除运行数据绕过。'));

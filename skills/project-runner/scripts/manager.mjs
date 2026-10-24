@@ -134,7 +134,7 @@ function renderHuman(command, data) {
         `stdout=${data.logPaths.stdout}`,
         `stderr=${data.logPaths.stderr}`,
         data.note ?? '',
-        '观察：manager ui 可在浏览器只读查看全部受管应用与日志（Ctrl+C 退出）',
+        '观察：manager ui 可在浏览器查看全部受管应用与日志，并可对本机受管应用执行启动/停止/重启/移除（页面二次确认；Ctrl+C 退出）',
       ].filter(Boolean).join('\n');
     case 'record-unmanaged':
       return [

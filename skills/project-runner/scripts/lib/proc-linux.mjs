@@ -110,10 +110,10 @@ export function verify(pid, expected) {
 
 // pidfd 终止原语：helper 先 pidfd_open 锚定进程实例，再核验记录身份，最后在同一
 // pidfd 上发信号并等待退出——PID 复用无法进入核验→发信号这个窗口。sig 为信号名。
-function pidfdTerminate(pid, expected, waitMs, sig) {
+function pidfdTerminate(pid, expected, waitMs, sig, freeze = false) {
   let lastError = null;
   for (const python of ['python3', 'python']) {
-    const r = spawnSync(python, [PIDFD_TERMINATE, String(pid), String(expected.creationFileTime), String(expected.image), String(waitMs), sig],
+    const r = spawnSync(python, [PIDFD_TERMINATE, String(pid), String(expected.creationFileTime), String(expected.image), String(waitMs), sig, freeze ? '1' : '0'],
       { encoding: 'utf8', timeout: Math.max(0, waitMs) + 5000, windowsHide: true, maxBuffer: 64 * 1024 });
     if (r.error?.code === 'ENOENT') continue;
     if (r.error) {
@@ -142,11 +142,11 @@ function pidfdTerminate(pid, expected, waitMs, sig) {
     EXIT.DEPENDENCY);
 }
 
-export function terminate(pid, expected, waitMs = TERMINATE_WAIT_MS) {
+export function terminate(pid, expected, waitMs = TERMINATE_WAIT_MS, options = {}) {
   if (!Number.isInteger(pid) || pid <= 0 || !expected?.creationFileTime || !expected?.image) {
     return { result: 'error', code: 'badArgs' };
   }
-  return pidfdTerminate(pid, expected, waitMs, 'SIGKILL');
+  return pidfdTerminate(pid, expected, waitMs, 'SIGKILL', options.freeze === true);
 }
 
 function childrenByParent(rows) {
@@ -364,7 +364,7 @@ export function run(action, params = {}) {
     case 'descendants': return descendants(params.id);
     case 'capture': return capture(params.id);
     case 'verify': return verify(params.id, params);
-    case 'terminate': return terminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
+    case 'terminate': return terminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS, { freeze: params.freeze === true });
     case 'terminate-tree': return terminateTree(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
     case 'grace': return gracefulTerminate(params.id, params, params.waitMs ?? TERMINATE_WAIT_MS);
     case 'discover': return discover(params.id, params.image, params.waitMs ?? COMMAND_DISCOVER_TIMEOUT_MS);
