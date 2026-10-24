@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { isWindows, findExecutable, killTree, listDescendants, findProcesses } from './platform.mjs';
 import { computeAppId } from '../lib/desc.mjs';
 import { psProc } from '../lib/probe.mjs';
+import { persistableDiscovery } from '../lib/launch.mjs';
 
 const MANAGER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'manager.mjs');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-runtime-smoke-'));
@@ -21,6 +22,7 @@ const projUm = path.join(base, 'um-app');
 const projCmd = path.join(base, 'cmd-app');
 const projAmb = path.join(base, 'amb-app');
 const projNpm = path.join(base, 'npm-app');
+const CMD_SENTINEL = 'PR_SMOKE_SENTINEL_DB_PASSWORD_e7c1f4a9';
 for (const d of [projNode, projPy, projUm, projCmd, projAmb, projNpm]) fs.mkdirSync(d, { recursive: true });
 
 fs.writeFileSync(path.join(projNode, 'srv.js'),
@@ -121,6 +123,21 @@ try {
     const upper = computeAppId('/tmp/Project', 'Main');
     const lower = computeAppId('/tmp/project', 'main');
     assert.equal(upper === lower, isWindows);
+  });
+  await check('discovery 候选持久化投影：丢弃原始 cmd，仅保留身份与长度/摘要', () => {
+    const raw = {
+      result: 'error', code: 'cimFailed',
+      candidates: [{ pid: 1, image: '/usr/bin/node', comm: 'node', creationFileTime: 'boot:1', cmd: `node --db-password=${CMD_SENTINEL}` }],
+    };
+    const projected = persistableDiscovery(raw);
+    assert.equal(projected.code, 'cimFailed');
+    assert.equal(projected.candidates[0].pid, 1);
+    assert.equal(projected.candidates[0].image, '/usr/bin/node');
+    assert.equal(projected.candidates[0].comm, 'node');
+    assert.equal(projected.candidates[0].cmd, undefined, '投影仍保留原始 cmd');
+    assert.equal(projected.candidates[0].cmdLength, raw.candidates[0].cmd.length);
+    assert.match(projected.candidates[0].cmdHash, /^[0-9a-f]{16}$/);
+    assert(!JSON.stringify(projected).includes(CMD_SENTINEL), '投影仍包含哨兵原文');
   });
   if (process.platform === 'linux') {
     await check('Linux pidfd 终止在身份不匹配时拒绝发送信号', () => {
@@ -234,14 +251,29 @@ try {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
       alias: 'cmdamb', root: projAmb, entry: 'amb', mode: 'node',
-      command: 'node two.js', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
+      command: `node two.js --db-password=${CMD_SENTINEL}`, expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
     }));
     if (pwshMissing(r)) skip('缺 pwsh 7');
     for (const c of (r.json.error?.detail?.candidates ?? [])) strayPids.push(c.pid);
     strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? r.json.data?.wrapperPid ?? 0);
     assert.equal(r.code, 3, r.text);
     assert.equal(r.json.error.code, 'DISCOVERY_AMBIGUOUS');
-    assert.equal(cli('status', 'cmdamb').json.data.status, 'UNKNOWN');
+    const s = cli('status', 'cmdamb');
+    assert.equal(s.json.data.status, 'UNKNOWN');
+    // 安全回归：命令带哨兵参数，歧义证据的 CLI 输出、status 输出与 runtime JSON 均不得出现原文。
+    const runtimeRaw = fs.readFileSync(path.join(home, 'runtime', `${s.json.data.appId}.json`), 'utf8');
+    for (const [label, text] of [['CLI', r.text], ['status', s.text], ['runtime JSON', runtimeRaw]]) {
+      assert(!text.includes(CMD_SENTINEL), `${label} 泄露候选命令行原文`);
+    }
+    const candidates = r.json.error.detail.candidates;
+    assert(candidates.length >= 2, '歧义候选数不足，无法验证投影');
+    for (const c of candidates) {
+      assert.equal(c.cmd, undefined, 'CLI 候选仍携带原始 cmd');
+      assert.equal(typeof c.cmdLength, 'number', '候选缺少 cmdLength 证据');
+      assert.match(c.cmdHash, /^[0-9a-f]{16}$/, '候选缺少 cmdHash 证据');
+    }
+    const persisted = JSON.parse(runtimeRaw).current.lastError;
+    assert(!/"cmd"\s*:/.test(persisted), `runtime lastError 仍含原始 cmd：${persisted}`);
   });
   await check('cleanup-wrapper 清理歧义残留 wrapper，UNKNOWN 证据保留', () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');

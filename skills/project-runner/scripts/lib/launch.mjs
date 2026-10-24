@@ -2,6 +2,7 @@
 // identity capture (direct exe) or descendant discovery (command mode) → record.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SCHEMA_VERSION } from './constants.mjs';
@@ -50,6 +51,30 @@ export function cleanupWrapper(rt) {
   try {
     psProc('terminate', { id: cur.wrapperPid, creationFileTime: cur.wrapperCreationFileTime, image: cur.wrapperImage });
   } catch { /* best-effort */ }
+}
+
+// 持久化投影：候选的 cmd 只用于内存中的启动器单链折叠，绝不可落盘。
+// 保留可核验的进程身份字段，并用长度/摘要代替原始命令行（design.md 2.1）。
+const CANDIDATE_PERSIST_FIELDS = ['pid', 'image', 'comm', 'creationFileTime'];
+
+export function persistableCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'object') return candidate;
+  const out = {};
+  for (const field of CANDIDATE_PERSIST_FIELDS) {
+    if (candidate[field] !== undefined) out[field] = candidate[field];
+  }
+  if (typeof candidate.cmd === 'string') {
+    out.cmdHash = crypto.createHash('sha256').update(candidate.cmd).digest('hex').slice(0, 16);
+    out.cmdLength = candidate.cmd.length;
+  }
+  return out;
+}
+
+// lastError 与 failUnresolved detail 共用同一投影，避免只改一处导致命令原文漏进运行记录。
+export function persistableDiscovery(detail) {
+  if (!detail || typeof detail !== 'object') return detail;
+  if (!Array.isArray(detail.candidates)) return detail;
+  return { ...detail, candidates: detail.candidates.map(persistableCandidate) };
 }
 
 export async function launchManaged(home, appId, app, opts = {}) {
@@ -234,10 +259,11 @@ export async function launchManaged(home, appId, app, opts = {}) {
   }
 
   if (d.result === 'found') {
-    // 歧义即拒绝：候选清单留证，wrapper 仍在运行由人工决定处置
+    // 歧义即拒绝：候选清单留证（白名单投影，不落原始命令行），wrapper 仍在运行由人工决定处置
+    const candidates = persistableDiscovery({ candidates: d.candidates }).candidates;
     rt.current.phase = 'UNKNOWN';
-    rt.current.lastError = `discovery_ambiguous: ${JSON.stringify(d.candidates)}`;
-    failUnresolved('DISCOVERY_AMBIGUOUS', `wrapper(pid=${child.pid}) 后代中匹配 ${app.expectedImage} 的进程有 ${d.candidates.length} 个，拒绝任选一个；wrapper 仍在运行，证据已保留`, { wrapperPid: child.pid, expectedImage: app.expectedImage, candidates: d.candidates });
+    rt.current.lastError = `discovery_ambiguous: ${JSON.stringify(candidates)}`;
+    failUnresolved('DISCOVERY_AMBIGUOUS', `wrapper(pid=${child.pid}) 后代中匹配 ${app.expectedImage} 的进程有 ${d.candidates.length} 个，拒绝任选一个；wrapper 仍在运行，证据已保留`, { wrapperPid: child.pid, expectedImage: app.expectedImage, candidates });
   }
 
   if (d.result === 'wrapperExited') {
@@ -254,7 +280,8 @@ export async function launchManaged(home, appId, app, opts = {}) {
     failUnresolved('DISCOVERY_TIMEOUT', `${waitMs}ms 内未发现匹配 ${app.expectedImage} 的后代进程；wrapper(pid=${child.pid}) 可能仍在启动中，证据保留，拒绝自动重试`, { wrapperPid: child.pid, expectedImage: app.expectedImage });
   }
 
+  const projectedDetail = persistableDiscovery(d);
   rt.current.phase = 'UNKNOWN';
-  rt.current.lastError = `discovery_failed: ${JSON.stringify(d)}${spawnError ? `; spawn_error: ${spawnError.code ?? spawnError.message}` : ''}`;
-  failUnresolved('DISCOVERY_FAILED', `后代发现失败（${d.code ?? d.result}），标记 UNKNOWN；wrapper(pid=${child.pid})证据保留`, { wrapperPid: child.pid, detail: d });
+  rt.current.lastError = `discovery_failed: ${JSON.stringify(projectedDetail)}${spawnError ? `; spawn_error: ${spawnError.code ?? spawnError.message}` : ''}`;
+  failUnresolved('DISCOVERY_FAILED', `后代发现失败（${d.code ?? d.result}），标记 UNKNOWN；wrapper(pid=${child.pid})证据保留`, { wrapperPid: child.pid, detail: projectedDetail });
 }
