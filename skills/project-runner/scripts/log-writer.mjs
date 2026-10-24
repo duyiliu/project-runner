@@ -93,9 +93,9 @@ function writeChunk(stream, input) {
   const filePath = isOut ? outPath : errPath;
   if (chunk.length > limit) chunk = chunk.subarray(chunk.length - limit);
   if (fd == null) {
-    // 此前轮转 reopen 失败（标记过 rotateFailed）：懒重开——append 模式，
-    // 若 rename 当时也失败则旧内容仍在，append 续写不覆盖；仍失败则丢本
-    // chunk 等下次再试，日志管道故障绝不波及目标进程。
+    // 此前轮转已成功移走旧文件，但创建新文件失败（标记过 rotateFailed）：
+    // 懒重开——append 模式续写；仍失败则丢本 chunk 等下次再试，日志管道
+    // 故障绝不波及目标进程。
     try {
       fd = fs.openSync(filePath, 'a');
       size = (() => { try { return fs.statSync(filePath).size; } catch { return 0; } })();
@@ -103,21 +103,32 @@ function writeChunk(stream, input) {
     } catch { return; }
   }
   if (size + chunk.length > limit) {
-    try { fs.closeSync(fd); } catch { /* already closed */ }
-    try { fs.unlinkSync(`${filePath}.1`); } catch { /* absent */ }
-    try { fs.renameSync(filePath, `${filePath}.1`); } catch { /* best effort */ }
+    // 先尝试把当前文件移走，成功后才允许截断创建新文件：Windows 上杀软扫描/
+    // 短暂占用会让 rename 失败，此时若继续 open('w') 就会把当前批次唯一的
+    // 证据截断。rename 直接覆盖旧的 .1（不先删除），失败时旧证据与当前 fd
+    // 都保持完整；记录失败供 status/UI 透出，后续超过上限的写入再重试轮转。
+    let rotated = false;
     try {
-      fd = fs.openSync(filePath, 'w');
+      fs.renameSync(filePath, `${filePath}.1`);
+      rotated = true;
     } catch {
-      // reopen 失败：置空 fd 转为懒重开路径，并持久化 logRotateFailedStreams
-      // 供 status/UI 透出——不再静默丢后续全部日志。
-      if (isOut) outFd = null; else errFd = null;
       markRotateFailed(stream);
-      return;
     }
-    size = 0;
-    if (isOut) outFd = fd; else errFd = fd;
-    markRotated(stream);
+    if (rotated) {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+      fd = null;
+      try {
+        fd = fs.openSync(filePath, 'w');
+        size = 0;
+        markRotated(stream);
+      } catch {
+        // 新文件创建失败：置空 fd 转为懒重开路径，后续日志仍可继续落盘。
+        fd = null;
+        markRotateFailed(stream);
+      }
+      if (isOut) outFd = fd; else errFd = fd;
+      if (fd == null) return;
+    }
   }
   fs.writeSync(fd, chunk);
   size += chunk.length;

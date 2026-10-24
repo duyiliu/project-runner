@@ -14,6 +14,9 @@ import { conflictError } from './errors.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LOG_WRITER = path.join(SCRIPTS_DIR, 'log-writer.mjs');
+// log-writer 可在启动期间把轮转结果写入同一 runId 的 runtime；launch 的旧快照
+// 落账时必须把这些字段带过来，避免启动完成时的 writeRuntime 覆盖失败证据。
+const LOG_ROTATION_FIELDS = ['logRotated', 'logRotatedStreams', 'logRotateFailedStreams'];
 
 // 命令模式的顶层 wrapper：Windows 是 cmd.exe，Linux 是 /bin/sh；两者都必须是
 // 可校验的真实可执行文件（sh 不允许被 shebang 脚本冒充）。
@@ -77,10 +80,21 @@ export async function launchManaged(home, appId, app, opts = {}) {
     logPaths: { stdout: outPath, stderr: errPath },
     lastError: null, endedAt: null, exitNote: null,
   };
-  writeRuntime(home, appId, rt);
+  const writeLaunchState = () => {
+    try {
+      const latest = readRuntimeStrict(home, appId);
+      if (latest?.current?.runId === runId) {
+        for (const key of LOG_ROTATION_FIELDS) {
+          if (latest.current[key] !== undefined) rt.current[key] = latest.current[key];
+        }
+      }
+    } catch { /* 读取失败不阻断启动落账；本次至少保留内存中的状态 */ }
+    writeRuntime(home, appId, rt);
+  };
+  writeLaunchState();
 
   const failUnresolved = (code, message, detail) => {
-    writeRuntime(home, appId, rt);
+    writeLaunchState();
     const stderrTail = readStderrTailSafe(rt.current.logPaths.stderr);
     throw conflictError(code, message, { runId, logPaths: rt.current.logPaths, ...detail, stderrTail });
   };
@@ -190,7 +204,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.creationFileTime = cap.creationFileTime;
       rt.current.image = cap.image;
       captureLoggerCreationFileTime(rt.current); // 目标核验后再采：多一次 pwsh 也不挤占启动热路径
-      writeRuntime(home, appId, rt);
+      writeLaunchState();
       return rt.current;
     }
     rt.current.phase = 'UNKNOWN';
@@ -225,7 +239,7 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.creationFileTime = t.creationFileTime;
       rt.current.image = t.image;
       captureLoggerCreationFileTime(rt.current);
-      writeRuntime(home, appId, rt);
+      writeLaunchState();
       return rt.current;
     }
     rt.current.phase = 'UNKNOWN';
