@@ -691,6 +691,14 @@ function handlePollError(e) {
 // ---------- 应用列表 ----------
 
 function statusPill(status) { return el('span', 'pill st-' + (status ?? 'UNKNOWN'), status ?? 'UNKNOWN'); }
+function exitLabel(exit) {
+  if (!exit) return null;
+  if (exit.signal) return 'signal=' + exit.signal;
+  if (exit.code != null) return 'code=' + exit.code;
+  return '退出码/信号不可用';
+}
+function exitOk(exit) { return !!exit && !exit.signal && exit.code === 0; }
+function exitClass(exit) { return exit ? (exitOk(exit) ? 'good' : 'bad') : undefined; }
 function renderApps() {
   const list = $('#appList');
   const q = ($('#appSearch').value || '').trim().toLowerCase();
@@ -733,6 +741,7 @@ function renderApps() {
         meta.appendChild(link);
       } else meta.appendChild(el('span', null, ':' + a.expectedPort));
     }
+    if (a.exit) meta.appendChild(el('span', 'v ' + exitClass(a.exit), exitLabel(a.exit)));
     if (a.error) meta.appendChild(el('span', 'v bad', a.error));
     card.appendChild(meta);
     card.appendChild(el('div', 'app-root', a.root ?? ''));
@@ -791,7 +800,7 @@ async function loadApps() {
       if (old?.status === 'RUNNING' && ['STOPPED', 'UNKNOWN'].includes(a.status) && old.runId === runId) {
         try {
           const detail = await api('/api/status?app=' + encodeURIComponent(a.alias));
-          notifyExit(runId, a.status, detail.run?.exitNote || detail.run?.lastError || detail.note || a.error || '退出说明不可用');
+          notifyExit(runId, a.status, detail.run?.exitNote || detail.run?.exitSummary || detail.run?.lastError || detail.note || a.error || '退出说明不可用');
         } catch { notifyExit(runId, a.status, a.error || '退出说明不可用'); }
       }
       previousStatuses.set(a.alias, { status: a.status, runId });
@@ -942,7 +951,18 @@ function renderDetail(d) {
   kvRow(grid, 'phase', run?.phase);
   kvRow(grid, '启动时间', fmtTime(run?.startedAt));
   kvRow(grid, '结束时间', fmtTime(run?.endedAt));
+  const runExit = run?.exit;
+  const runExitText = runExit
+    ? `${exitLabel(runExit)}${runExit.at ? ' · ' + fmtTime(runExit.at) : ''}`
+    : null;
+  kvRow(grid, '退出结果', run?.exitSummary, run?.exitSummary ? exitClass(runExit) : undefined);
+  kvRow(grid, '退出码/信号', runExitText, exitClass(runExit));
+  if (run?.wrapperExit) {
+    const wrapperExitText = `${exitLabel(run.wrapperExit)}${run.wrapperExit.at ? ' · ' + fmtTime(run.wrapperExit.at) : ''}`;
+    kvRow(grid, 'wrapper 退出（非目标）', wrapperExitText, 'dim');
+  }
   kvRow(grid, '退出说明', run?.exitNote, run?.exitNote ? 'dim' : undefined);
+  kvRow(grid, '退出证据', run?.exitWatchError?.reason ? `不可用：${run.exitWatchError.reason}` : null, 'bad');
   kvRow(grid, '最近错误', run?.lastError, run?.lastError ? 'bad' : undefined);
   kvRow(grid, '身份证据', run?.creationFileTime ? `${run.creationFileTime} · ${run.image ?? '?'}` : null, 'dim');
   kvRow(grid, '环境引用', run?.envResolved?.length ? run.envResolved.join(', ') : null, 'dim');
@@ -966,6 +986,7 @@ function renderDetail(d) {
       row.tabIndex = 0;
       row.appendChild(el('span', 'rid', p.runId));
       row.appendChild(el('span', 'dim', p.phase ?? '?'));
+      if (p.exit) row.appendChild(el('span', 'v ' + exitClass(p.exit), exitLabel(p.exit)));
       if (p.pid != null) row.appendChild(el('span', 'dim', 'pid ' + p.pid));
       if (p.archivedAt) row.appendChild(el('span', 'dim', '归档 ' + fmtTime(p.archivedAt)));
       if (p.archiveReason) row.appendChild(el('span', 'why', p.archiveReason));
@@ -1033,7 +1054,7 @@ async function loadStatus() {
     const old = previousStatuses.get(selected);
     const runId = detail.run?.runId;
     if (old?.status === 'RUNNING' && old.runId === runId && ['STOPPED', 'UNKNOWN'].includes(detail.status)) {
-      notifyExit(runId, detail.status, detail.run?.exitNote || detail.run?.lastError || detail.note || '退出说明不可用');
+      notifyExit(runId, detail.status, detail.run?.exitNote || detail.run?.exitSummary || detail.run?.lastError || detail.note || '退出说明不可用');
     }
     previousStatuses.set(selected, { status: detail.status, runId });
     renderDetail(detail);

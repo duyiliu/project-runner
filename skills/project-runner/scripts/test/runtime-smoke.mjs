@@ -30,6 +30,10 @@ fs.writeFileSync(path.join(projNode, 'multi.js'),
   "console.log('multi-line-1');\nconsole.log('multi-line-2');\nconsole.log('multi-line-3');\nsetInterval(() => {}, 1000);\n", 'utf8');
 fs.writeFileSync(path.join(projCmd, 'srv.js'),
   'console.log("cmd-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
+// #102：wrapper 等待真实目标后以普通 0 退出，用于验证 wrapper 退出不冒充目标退出。
+fs.writeFileSync(path.join(projCmd, 'detach-wrapper.bat'), '@echo off\r\nnode srv.js\r\nexit /b 0\r\n', 'utf8');
+fs.writeFileSync(path.join(projCmd, 'detach-wrapper.sh'), '#!/bin/sh\nnode srv.js\nexit 0\n', 'utf8');
+try { fs.chmodSync(path.join(projCmd, 'detach-wrapper.sh'), 0o755); } catch { /* Windows 无执行位 */ }
 fs.writeFileSync(path.join(projAmb, 'srv.js'),
   'console.log("amb-ready");\nsetInterval(() => {}, 1000);\n', 'utf8');
 // 自身再 spawn 一个 node 子进程 → wrapper 后代中稳定出现 2 个 node.exe，用于歧义拒绝
@@ -280,6 +284,46 @@ try {
     assert.match(r.json.error.detail.stderrTail, /Cannot find module/);
     assert.equal(cli('status', 'cmdfail').json.data.status, 'STOPPED');
   });
+  await check('command 模式 wrapper 退出不冒充受管目标退出证据', async () => {
+    if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
+    // wrapper 等待真实目标后主动以普通 0 退出；目标被杀时 wrapper 仍返回 0，
+    // log-writer 不得把这个 wrapper 结果写成 target.exit。
+    const r = cli('start-new', '--desc', descFile({
+      alias: 'cmddetach', root: projCmd, entry: 'detach', mode: 'node',
+      command: isWindows ? 'detach-wrapper.bat' : './detach-wrapper.sh', expectedImage: NODE_IMAGE, discoverTimeoutMs: 15000,
+    }));
+    if (pwshMissing(r)) skip('缺 pwsh 7');
+    if (r.code !== 0) strayWrapperPids.push(r.json.error?.detail?.wrapperPid ?? 0);
+    assert.equal(r.code, 0, r.text);
+    assert.equal(r.json.data.status, 'RUNNING');
+    const rtFile = path.join(home, 'runtime', `${r.json.data.appId}.json`);
+    process.kill(r.json.data.pid, 'SIGKILL');
+    let wrapperExit = null;
+    let targetExit = null;
+    for (let i = 0; i < 100; i++) {
+      const rt = JSON.parse(fs.readFileSync(rtFile, 'utf8'));
+      wrapperExit = rt.current.wrapperExit ?? null;
+      targetExit = rt.current.exit ?? null;
+      if (wrapperExit && targetExit) break;
+      await wait(100);
+    }
+    assert.equal(wrapperExit?.code, 0, `wrapper 普通退出证据缺失：${JSON.stringify(wrapperExit)}`);
+    assert(targetExit, 'exit-watcher 未记录受管目标的真实退出');
+    assert(!(targetExit.code === 0 && targetExit.signal == null), `目标被 SIGKILL 后仍记为 wrapper 的正常退出：${JSON.stringify(targetExit)}`);
+    if (process.platform === 'linux') assert.equal(targetExit.signal, 'SIGKILL');
+    // stop 自己终止目标时，受管目标必须有独立于 wrapper 的退出证据。
+    assert.equal(cli('stop', 'cmddetach').code, 0);
+    const started = cli('start', 'cmddetach');
+    assert.equal(started.code, 0, started.text);
+    assert.equal(started.json.data.status, 'RUNNING');
+    assert.equal(cli('stop', 'cmddetach').code, 0);
+    const after = JSON.parse(fs.readFileSync(rtFile, 'utf8')).current;
+    assert(after.exit, 'stop 应落受管目标退出证据');
+    assert(!(after.exit.code === 0 && after.exit.signal == null), 'stop 后仍显示 wrapper 的正常退出');
+    if (process.platform === 'linux') assert.equal(after.exit.signal, 'SIGKILL');
+    const st = cli('status', 'cmddetach').json.data;
+    assert(st.run.exit && !(st.run.exit.code === 0 && st.run.exit.signal == null), `status 未展示目标退出：${JSON.stringify(st.run.exit)}`);
+  });
   await check('command 模式多行 stdout 经 detached 链路完整（#50 回归）', async () => {
     if (!nodeRunId && skipped) skip('pwsh 缺失已跳过');
     const r = cli('start-new', '--desc', descFile({
@@ -477,7 +521,7 @@ try {
   });
 } finally {
   // 兜底：按当时仍在的后代 PID 清理，不只依赖 wrapper PID（wrapper 可能先死，#46）
-  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail']) {
+  for (const a of ['nodeapp', 'pyapp', 'cmdapp', 'mline', 'npmdev', 'portapp', 'cmdtree', 'cmdamb', 'cmdtmo', 'cmdfail', 'cmddetach']) {
     try { cli('stop', a, '--tree'); } catch { /* 忽略 */ }
   }
   const cleanupFailures = [];

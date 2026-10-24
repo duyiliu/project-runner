@@ -96,11 +96,16 @@ function renderHuman(command, data) {
       return `project-runner manager v${data.version}`;
     case 'list': {
       if (!data.apps?.length) return data.note ?? '（空）';
-      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'lastRunId';
+      const exitText = (a) => a.exit
+        ? (a.exit.signal ? `signal=${a.exit.signal}` : `code=${a.exit.code ?? '?'}`)
+        : '-';
+      const head = 'alias'.padEnd(14) + 'mode'.padEnd(8) + 'status'.padEnd(10) + 'managed'.padEnd(9) + 'pid'.padEnd(8) + 'port'.padEnd(7) + 'exit'.padEnd(14) + 'lastRunId';
       const rows = data.apps.map((a) =>
         String(a.alias).padEnd(14) + String(a.mode ?? '').padEnd(8) + String(a.status).padEnd(10)
-        + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.expectedPort ?? '-').padEnd(7) + String(a.lastRunId ?? '-')
-        + (a.error ? `\n  ! ${a.error}` : ''));
+        + String(a.managed ?? '?').padEnd(9) + String(a.pid ?? '-').padEnd(8) + String(a.expectedPort ?? '-').padEnd(7)
+        + exitText(a).padEnd(14) + String(a.lastRunId ?? '-')
+        + (a.error ? `\n  ! ${a.error}` : '')
+        + (a.exitSummary ? `\n  exit: ${a.exitSummary}` : ''));
       return [head, ...rows].join('\n');
     }
     case 'port':
@@ -112,6 +117,7 @@ function renderHuman(command, data) {
         `${data.alias} (${data.appId}) mode=${data.mode} status=${data.status} managed=${data.managed}${data.pid ? ` pid=${data.pid}` : ''}`,
         data.run ? `run=${data.run.runId} phase=${data.run.phase} managed=${data.run.managed} started=${data.run.startedAt ?? '-'}` : 'run=无',
         data.run?.pid != null ? `pid=${data.run.pid}${data.run.creationFileTime ? ` creationFileTime=${data.run.creationFileTime}` : ''}${data.run.image ? ` image=${data.run.image}` : ''}` : null,
+        data.run?.exit ? `exit: ${data.run.exit.signal ? `signal=${data.run.exit.signal}` : `code=${data.run.exit.code ?? '?'}`}${data.run.exit.at ? ` at=${data.run.exit.at}` : ''}${data.run.exitSummary ? `（${data.run.exitSummary}）` : ''}` : null,
         Object.keys(data.env ?? {}).length ? `env=${JSON.stringify(data.env)}` : null,
         data.run?.lastError ? `lastError: ${data.run.lastError}` : null,
         data.run?.logPaths?.stdout ? `stdout=${data.run.logPaths.stdout}` : null,

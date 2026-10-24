@@ -12,7 +12,7 @@ import { usageError, notFoundError, conflictError } from './errors.mjs';
 import { loadManagedDesc, loadUnmanagedDesc, canonicalizeDesc, realpathOrConflict, resolveExe, computeAppId, upsertApp, newRunId, ENTRY_RE, MODES } from './desc.mjs';
 import { psProc, verifyRun, verifyRuns, listDescendants, portOccupants, portConflict, tcpListening, TERMINATE_WAIT_MS, invalidateVerifyCache, cacheVerifyResult, interpretVerifyResult } from './probe.mjs';
 import { withLock, withLockAsync, withRegistryLock } from './locks.mjs';
-import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId } from './runtime.mjs';
+import { resolveAppId, archiveCurrent, writeRuntime, computeStatus, statusWithFacts, resolveUnresolvedRun, parseAckRunId, exitSummary } from './runtime.mjs';
 import { launchManaged, cleanupWrapper } from './launch.mjs';
 import { resolveLogFile, listRuns, listSources, resolveSource, listTree, readProjectFile, mergeStreamTails, followLogs } from './log-sources.mjs';
 import { readTailLines, MAX_LOG_LINES } from './logs.mjs';
@@ -306,12 +306,17 @@ export function cmdList(ctx) {
     } catch (e) {
       return { alias: app.alias, appId: app.appId, mode: app.mode, status: 'UNKNOWN', managed: null, error: `${e.code}: ${e.message}`, root: app.root };
     }
+    const current = rt?.current ?? null;
+    const runExit = current?.exit ?? null;
     return {
       alias: app.alias, appId: app.appId, mode: app.mode,
-      status: st.status, managed: st.managed ?? (rt?.current?.managed ?? null),
-      pid: st.status === 'RUNNING' ? (st.pid ?? rt?.current?.pid) : null,
-      expectedPort: app.expectedPort, lastRunId: rt?.current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
-      log: rt?.current?.logPaths?.stdout ?? null, root: app.root,
+      status: st.status, managed: st.managed ?? (current?.managed ?? null),
+      pid: st.status === 'RUNNING' ? (st.pid ?? current?.pid) : null,
+      expectedPort: app.expectedPort, lastRunId: current?.runId ?? rt?.prevRuns?.[0]?.runId ?? null,
+      exit: runExit, exitSummary: exitSummary(current),
+      exitWatchError: current?.exitWatchError ?? null,
+      exitNote: st.note ?? current?.exitNote ?? null,
+      log: current?.logPaths?.stdout ?? null, root: app.root,
     };
   });
   if (!apps.length) return { apps: [], note: '注册表为空：尚无由本 Skill 启动并记录的应用' };
@@ -393,6 +398,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
   const readiness = readyRequested && st.status === 'RUNNING' ? await readinessCheck(ctx.home, app, cur)
     : readyRequested ? { state: 'UNTESTED', configured: Boolean(app.readyLogPattern || app.readyUrl), evidence: [], note: '非 RUNNING，不就绪评估' } : null;
   const jrebelEvidence = cur?.mode === 'jrebel' ? extractJrebelEvidence(ctx.home, appId, cur) : null;
+  const runExit = cur?.exit ?? null;
+  const runExitSummary = exitSummary(cur);
   return {
     alias: app.alias, appId, entry: app.entry, mode: app.mode, root: app.root,
     status: st.status, managed: st.managed ?? false,
@@ -400,6 +407,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
     pid: st.pid ?? cur?.pid ?? null,
     runtimeFile: evidenceFile,
     expectedPort: app.expectedPort,
+    exit: runExit,
+    exitSummary: runExitSummary,
     portNote: probeRequested ? '端口监听仅为 TCP 证据；监听 ≠ 业务就绪' : '使用 --probe 执行本机 TCP 监听探测',
     ...(probeRequested ? { portListening } : {}),
     ...(jrebelEvidence ? { jrebelEvidence } : {}),
@@ -415,6 +424,8 @@ export async function cmdStatus(ctx, ref, probeRequested = false, readyRequested
       logRotated: cur.logRotated ?? false, logRotatedStreams: cur.logRotatedStreams ?? [],
       logRotateFailedStreams: cur.logRotateFailedStreams ?? [],
       lastError: cur.lastError, exitNote: cur.exitNote ?? null,
+      exit: runExit, exitSummary: runExitSummary, wrapperExit: cur.wrapperExit ?? null,
+      exitWatchError: cur.exitWatchError ?? null,
       evidenceFile,
     } : null,
     ...(readiness ? { readiness } : {}),
@@ -518,10 +529,11 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
     const v = psProc('verify', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
     if (v.result === 'ok') treeSnapshot = snapshotTree(cur);
   }
-  const markStopped = (note, extra = {}, killTree = false) => {
+  const markStopped = (note, extra = {}, killTree = false, exitEvidence = null) => {
     cur.phase = 'STOPPED';
     cur.endedAt = new Date().toISOString();
     cur.exitNote = note;
+    if (exitEvidence) cur.exit = { ...exitEvidence, at: cur.endedAt };
     invalidateVerifyCache(cur.pid); // 终止后立即作废缓存存活结论，避免 stop→start 竞态读到旧值
     cleanupWrapper(rt); // 命令模式：先清理残留 wrapper，再处理目标后代
     const treeKilled = opts.tree ? (killTree && treeSnapshot ? terminateTreeSnapshot(treeSnapshot) : []) : null;
@@ -535,6 +547,9 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   if (opts.graceMs != null) {
     const g = psProc('grace', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image, waitMs: opts.graceMs });
     if (g.result === 'gracefulTerminated') {
+      // 只证明“发出 SIGTERM 后目标在窗口内退出”，不能据此断言目标被信号终止：
+      // 目标可能捕获 SIGTERM 后以 code=0 正常退出。真实退出结果由 log-writer（直连）
+      // 或 exit-watcher（command 模式目标）在观察到实际退出事件后写入。
       return markStopped(`grace 窗口 ${opts.graceMs}ms 内优雅退出（SIGTERM/WM_CLOSE）`, {}, true);
     }
     if (g.result !== 'stillAlive') {
@@ -556,7 +571,12 @@ function stopCurrent(home, appId, app, rt, opts = {}) {
   const t = psProc('terminate', { id: cur.pid, creationFileTime: cur.creationFileTime, image: cur.image });
   if (t.result === 'terminated') {
     const graceNote = opts.graceMs != null ? `；已先等待 grace ${opts.graceMs}ms 未退出` : '';
-    return markStopped(`terminated(137) 有界强制停止${opts.tree ? '（--tree）' : ''}${graceNote}`, {}, true);
+    // stop 自己发出的有界强杀也是目标退出事实：command 模式下 wrapper 的 exit 不能
+    // 代表目标，这里先在锁内落下受管目标的信号/137 语义证据，后续 logger 仅能补写同类。
+    const forcedExit = process.platform === 'linux'
+      ? { code: null, signal: 'SIGKILL', source: 'manager-stop' }
+      : { code: 137, signal: null, source: 'manager-stop' };
+    return markStopped(`terminated(137) 有界强制停止${opts.tree ? '（--tree）' : ''}${graceNote}`, {}, true, forcedExit);
   }
   if (t.result === 'exited' || t.result === 'notfound') {
     return { ...markStopped('进程已自行退出'), result: 'alreadyStopped' };

@@ -14,6 +14,7 @@ import { conflictError } from './errors.mjs';
 
 const SCRIPTS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LOG_WRITER = path.join(SCRIPTS_DIR, 'log-writer.mjs');
+const EXIT_WATCHER = path.join(SCRIPTS_DIR, 'exit-watcher.mjs');
 
 // 命令模式的顶层 wrapper：Windows 是 cmd.exe，Linux 是 /bin/sh；两者都必须是
 // 可校验的真实可执行文件（sh 不允许被 shebang 脚本冒充）。
@@ -50,6 +51,33 @@ export function cleanupWrapper(rt) {
   try {
     psProc('terminate', { id: cur.wrapperPid, creationFileTime: cur.wrapperCreationFileTime, image: cur.wrapperImage });
   } catch { /* best-effort */ }
+}
+
+// command 模式：log-writer 只能看到 shell wrapper，真实目标由 discover 找到。
+// 目标与 wrapper 不同 pid 时启动 detached watcher，用目标自身身份等待其真实退出，
+// 避免把 wrapper 的普通退出当成目标 code/signal。
+function startTargetExitWatcher(home, appId, runId, cur) {
+  if (!Number.isInteger(cur.pid) || cur.pid <= 0 || !cur.creationFileTime) return false;
+  // shell exec 后 wrapper 就是目标，log-writer 自身已有精确 exit 事件，无需 watcher。
+  if (Number.isInteger(cur.wrapperPid) && cur.pid === cur.wrapperPid) return true;
+  const logDir = cur.logPaths ? path.dirname(cur.logPaths.stdout) : SCRIPTS_DIR;
+  const readyFile = path.join(logDir, `.${runId}.exit-watch.ready`);
+  let ready = false;
+  try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
+  try {
+    const watcher = spawn(process.execPath, [
+      EXIT_WATCHER, home, appId, runId, String(cur.pid), String(cur.creationFileTime), readyFile,
+    ], { cwd: logDir, detached: true, windowsHide: true, stdio: 'ignore' });
+    watcher.unref();
+    // 等 helper 真正持有目标句柄/pidfd 后再返回启动成功；否则目标可能在 watcher
+    // 就绪前退出并被 wrapper 回收，真实退出证据永久缺失。
+    for (let i = 0; i < 250 && !fs.existsSync(readyFile); i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+    ready = fs.existsSync(readyFile);
+  } catch { /* 下面按未就绪处理 */ }
+  try { fs.rmSync(readyFile, { force: true }); } catch { /* absent */ }
+  return ready;
 }
 
 export async function launchManaged(home, appId, app, opts = {}) {
@@ -205,9 +233,14 @@ export async function launchManaged(home, appId, app, opts = {}) {
   }
 
   const waitMs = app.discoverTimeoutMs ?? COMMAND_DISCOVER_TIMEOUT_MS;
+  // 从已验证的真实 wrapper 往下发现（如 pidFile 未给出时回退 logger pid）：
+  // logger 可能因写退出证据而短暂存活，不能把“logger 还活着”误当成“wrapper 还活着”，
+  // 否则命令即死场景会从 wrapperExited 退化成 DISCOVERY_TIMEOUT。
+  const discoverAnchor = Number.isInteger(rt.current.wrapperPid) && rt.current.wrapperPid > 0
+    ? rt.current.wrapperPid : child.pid;
   let d;
   try {
-    d = psProc('discover', { id: child.pid, image: app.expectedImage, waitMs });
+    d = psProc('discover', { id: discoverAnchor, image: app.expectedImage, waitMs });
   } catch (e) {
     d = { result: 'error', code: 'discover_failed', message: e.message };
   }
@@ -226,6 +259,30 @@ export async function launchManaged(home, appId, app, opts = {}) {
       rt.current.image = t.image;
       captureLoggerCreationFileTime(rt.current);
       writeRuntime(home, appId, rt);
+      if (!startTargetExitWatcher(home, appId, runId, rt.current)) {
+        // 不能在没有真实目标退出证据通道时报告启动成功：先按已采集身份停止目标，
+        // 避免留下“已运行但退出码/信号永远不可得”的记录。
+        let term = null;
+        try {
+          term = psProc('terminate', {
+            id: rt.current.pid, creationFileTime: rt.current.creationFileTime, image: rt.current.image,
+          });
+        } catch (e) {
+          term = { result: 'error', message: e.message };
+        }
+        const stopped = ['terminated', 'exited', 'notfound'].includes(term?.result);
+        rt.current.phase = stopped ? 'STOPPED' : 'UNKNOWN';
+        rt.current.endedAt = stopped ? new Date().toISOString() : null;
+        rt.current.exitNote = stopped ? '退出证据 watcher 未就绪，已停止目标；未采集到退出码/信号' : null;
+        if (!stopped) rt.current.lastError = `exit_watch_unavailable: ${JSON.stringify(term)}`;
+        if (stopped) cleanupWrapper(rt);
+        writeRuntime(home, appId, rt);
+        throw conflictError('EXIT_WATCH_UNAVAILABLE',
+          stopped
+            ? `已发现目标（pid=${rt.current.pid}）但退出证据 watcher 未能就绪；目标已停止，未报告启动成功`
+            : `已发现目标（pid=${rt.current.pid}）但退出证据 watcher 未能就绪且目标停止未确认，标记 UNKNOWN；证据已保留`,
+          { runId, pid: rt.current.pid, wrapperPid: rt.current.wrapperPid, terminate: term });
+      }
       return rt.current;
     }
     rt.current.phase = 'UNKNOWN';

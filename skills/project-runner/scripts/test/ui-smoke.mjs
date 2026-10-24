@@ -49,7 +49,7 @@ rt('ahis', {
   runId: 'rtest1', phase: 'STOPPED', managed: true, mode: 'jrebel', intentAt: now, startedAt: now,
   pid: 99999, creationFileTime: '0', image: 'java.exe', envResolved: [],
   logPaths: { stdout: path.join(home, 'logs', 'ahis', 'rtest1.stdout.log'), stderr: path.join(home, 'logs', 'ahis', 'rtest1.stderr.log') },
-  lastError: null, endedAt: now, exitNote: 'smoke',
+  lastError: null, endedAt: now, exitNote: 'smoke', exit: { code: 0, signal: null, at: now },
 }, [{ runId: 'rold1', phase: 'STOPPED', managed: true, startedAt: now, endedAt: now, archivedAt: now }]);
 rt('arep', {
   runId: 'rtest2', phase: 'UNKNOWN', managed: false, mode: 'java', intentAt: now, startedAt: now,
@@ -144,15 +144,23 @@ try {
 
   const apps = (await get('/api/apps')).json.data.apps;
   await check('应用列表（4 个登记应用）', () => assert.equal(apps.length, 4));
+  await check('应用列表携带退出码/信号证据', () => {
+    const his = apps.find((a) => a.alias === 'his');
+    assert.equal(his.exit.code, 0);
+    assert.equal(his.exit.signal, null);
+  });
   await check('受管 STOPPED 状态', () => assert.equal(apps.find((a) => a.alias === 'his').status, 'STOPPED'));
   await check('非受管 managed=false', () => assert.equal(apps.find((a) => a.alias === 'report').managed, false));
   await check('缺失目录应用 ghost 仍列出', () => assert(apps.some((a) => a.alias === 'ghost')));
 
   const status = (await get('/api/status?app=his')).json.data;
-  await check('status 详情（runId/日志路径）', () => {
+  await check('status 详情（runId/日志路径/退出码）', () => {
     assert.equal(status.status, 'STOPPED');
     assert.equal(status.run.runId, 'rtest1');
     assert(status.run.logPaths.stdout.endsWith('rtest1.stdout.log'));
+    assert.equal(status.run.exit.code, 0);
+    assert.match(status.run.exitSummary, /正常退出（code=0）/);
+    assert.match(status.note, /正常退出（code=0）/, `status note 未展示退出证据：${status.note}`);
   });
 
   const runs = (await get('/api/runs?app=his')).json.data;

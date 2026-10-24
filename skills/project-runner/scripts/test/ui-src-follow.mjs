@@ -249,6 +249,14 @@ try {
   await restartAndSync('rtest8');
   await check('非当前记忆（标志=0）重启后保持', () => assert.equal(run('logSrc'), 'run:rold1.stdout'));
 
+  await check('详情卡展示退出码与信号并区分异常退出', () => {
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, note:'异常退出（code=7）', run:{ runId:'rexit', phase:'STOPPED', managed:true, exit:{code:7,signal:null,at:'2026-01-01T00:00:00.000Z'}, exitSummary:'异常退出（code=7）', exitNote:'异常退出（code=7）' } })`);
+    const text = elFor('detail').textContent;
+    assert(text.includes('退出结果') && text.includes('code=7') && text.includes('异常退出'), text);
+    run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, note:'被信号终止（signal=SIGKILL）', run:{ runId:'rsig', phase:'STOPPED', managed:true, exit:{code:null,signal:'SIGKILL',at:'2026-01-01T00:00:01.000Z'}, exitSummary:'被信号终止（signal=SIGKILL）' } })`);
+    const sigText = elFor('detail').textContent;
+    assert(sigText.includes('signal=SIGKILL') && sigText.includes('被信号终止'), sigText);
+  });
   await check('启停执行中呈 loading（busy 类 + 禁用 + “中…”标签）', async () => {
     run(`lifecycleBusy = true; lifecycleOpKey = 'his:start:';`);
     run(`renderDetail({ alias:'his', appId:'ahis', status:'STOPPED', managed:true, mode:'java', expectedPort:null, run:{ runId:'rtest8', phase:'STOPPED', managed:true } })`);

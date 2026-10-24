@@ -455,6 +455,18 @@ try {
     const rt = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8'));
     // Linux：SIGTERM 被捕获应优雅退出；Windows 控制台进程 taskkill 无 /F 多半失败 → grace 超时后强制
     assert(rt.current.exitNote.includes('grace'), `exitNote 未记录 grace 过程：${rt.current.exitNote}`);
+    if (!isWindows) {
+      // 发出 SIGTERM ≠ 目标被信号终止：gracer.js 捕获 SIGTERM 后 process.exit(0)，
+      // 退出证据必须来自实际 exit 事件（code=0/signal=null），不能写成 SIGTERM。
+      let exit = null;
+      for (let i = 0; i < 40; i++) {
+        exit = JSON.parse(fs.readFileSync(path.join(home, 'runtime', `${s.data.appId}.json`), 'utf8')).current.exit ?? null;
+        if (exit) break;
+        sleep(100);
+      }
+      assert.equal(exit?.code, 0, `grace 后目标退出码应为 0：${JSON.stringify(exit)}`);
+      assert.equal(exit?.signal, null, `捕获 SIGTERM 后正常退出不应记 signal：${JSON.stringify(exit)}`);
+    }
   });
 
   lifecycle('文本模式人类可读输出抽查（status 含 port/状态）', () => {
@@ -470,9 +482,70 @@ try {
     assert(r.stdout.split('\n')[0].includes('port'), r.stdout.split('\n')[0]);
     assert(r.stdout.includes('18080'), r.stdout);
   });
+
+  // ---------- 退出码/信号证据展示（#102；纯读，不依赖进程探针） ----------
+  check('status/list 展示退出码与信号，旧记录无 exit 仍可读', () => {
+    const file = path.join(home, 'runtime', `${appId}.json`);
+    const saved = fs.readFileSync(file, 'utf8');
+    const writeExit = (exit) => {
+      const rt = JSON.parse(saved);
+      rt.current.phase = 'STOPPED';
+      rt.current.exit = exit;
+      rt.current.exitNote = null;
+      fs.writeFileSync(file, JSON.stringify(rt, null, 2));
+    };
+    try {
+      writeExit({ code: 7, signal: null, at: '2026-01-01T00:00:00.000Z' });
+      const st = expectOk(run(['status', 'smoke']));
+      assert.equal(st.data.status, 'STOPPED');
+      assert.equal(st.data.run.exit.code, 7);
+      assert.match(st.data.run.exitSummary, /异常退出（code=7）/);
+      assert.match(st.data.note, /异常退出（code=7）/, `status note 未展示异常退出：${st.data.note}`);
+      const row = expectOk(run(['list'])).data.apps.find((a) => a.alias === 'smoke');
+      assert.equal(row.exit.code, 7);
+      assert.match(row.exitSummary, /异常退出（code=7）/);
+      assert(run(['status', 'smoke'], { json: false }).stdout.includes('code=7'), 'status 文本未展示 code');
+      assert(run(['list'], { json: false }).stdout.includes('code=7'), 'list 文本未展示 code');
+
+      writeExit({ code: null, signal: 'SIGKILL', at: '2026-01-01T00:00:01.000Z' });
+      const sig = expectOk(run(['status', 'smoke']));
+      assert.equal(sig.data.run.exit.signal, 'SIGKILL');
+      assert.match(sig.data.note, /被信号终止（signal=SIGKILL）/, `status note 未展示信号：${sig.data.note}`);
+      const sigRow = expectOk(run(['list'])).data.apps.find((a) => a.alias === 'smoke');
+      assert.equal(sigRow.exit.signal, 'SIGKILL');
+
+      // 旧 runtime 记录没有 exit 字段：沿用原有“进程已退出”文案，不报错。
+      const legacy = JSON.parse(saved);
+      legacy.current.phase = 'STOPPED';
+      delete legacy.current.exit;
+      legacy.current.exitNote = '进程已退出';
+      fs.writeFileSync(file, JSON.stringify(legacy, null, 2));
+      const old = expectOk(run(['status', 'smoke']));
+      assert.equal(old.data.status, 'STOPPED');
+      assert.equal(old.data.run.exit, null);
+      assert.match(old.data.note, /进程已退出/);
+      assert.equal(expectOk(run(['list'])).data.apps.find((a) => a.alias === 'smoke').exit, null);
+
+      // watcher 无法取得真实退出状态时必须显式透出不可用原因，不能静默伪装成已采集。
+      legacy.current.exitWatchError = { reason: 'target reaped before status', at: '2026-01-01T00:00:02.000Z' };
+      fs.writeFileSync(file, JSON.stringify(legacy, null, 2));
+      const watchErr = expectOk(run(['status', 'smoke']));
+      assert.match(watchErr.data.note, /退出码\/信号不可用（target reaped before status）/);
+      assert.equal(watchErr.data.run.exitWatchError.reason, 'target reaped before status');
+      const watchErrRow = expectOk(run(['list'])).data.apps.find((a) => a.alias === 'smoke');
+      assert.equal(watchErrRow.exitWatchError.reason, 'target reaped before status');
+    } finally {
+      fs.writeFileSync(file, saved);
+    }
+  });
 } finally {
   try { if (currentPid) process.kill(currentPid, 'SIGKILL'); } catch { /* 已退出 */ }
-  fs.rmSync(base, { recursive: true, force: true });
+  // stop 返回后 log-writer 可能仍在同一 cwd 下落退出证据（毫秒级）；Windows 上
+  // 立即删临时目录会偶发 EBUSY。等待内部短写完成，不修改任何智能断言。
+  for (let i = 0; i < 50; i++) {
+    try { fs.rmSync(base, { recursive: true, force: true }); break; }
+    catch (e) { if (i === 49) throw e; sleep(100); }
+  }
 }
 if (failed) { console.error(`\n${failed} 项失败`); process.exit(1); }
 if (skipped.length) console.log(`\n${skipped.length} 项跳过（缺 pwsh 7）`);

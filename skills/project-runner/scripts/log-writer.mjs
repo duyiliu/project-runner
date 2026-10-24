@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { readRuntimeStrict, atomicWriteJson } from './lib/store.mjs';
-import { withLock } from './lib/locks.mjs';
+import { withLogEvidenceLock } from './lib/locks.mjs';
 
 const [configPath] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -22,6 +22,12 @@ const rotateFailedStreams = new Set();
 const recordedFailedStreams = new Set();
 let rotationRetryTimer = null;
 let rotationRetryAttempts = 0;
+// 目标进程退出证据：runId 匹配当前记录时写入 current.exit（spawn 失败走 pidFile=0/lastError，不写 exit）。
+// 与轮转状态共用应用锁并按 runId 二次确认，避免并发 start/stop 时记到错误的 run。
+let exitInfo = null;
+let exitRecorded = false;
+let exitRetryTimer = null;
+let exitRetryAttempts = 0;
 
 function scheduleRotationRetry() {
   if (rotationRetryTimer || rotationRetryAttempts >= 40) return;
@@ -37,7 +43,7 @@ function persistRotationState() {
   if ([...rotatedStreams].every((stream) => recordedStreams.has(stream))
     && [...rotateFailedStreams].every((stream) => recordedFailedStreams.has(stream))) return;
   try {
-    withLock(home, appId, 'log-rotation', () => {
+    withLogEvidenceLock(home, appId, 'log-rotation', () => {
       const rt = readRuntimeStrict(home, appId);
       if (rt?.current?.runId !== runId) {
         for (const stream of rotatedStreams) recordedStreams.add(stream);
@@ -66,6 +72,60 @@ function markRotated(stream) {
 function markRotateFailed(stream) {
   rotateFailedStreams.add(stream);
   persistRotationState();
+}
+
+function scheduleExitRetry() {
+  if (exitRetryTimer || exitRetryAttempts >= 40) return;
+  const delay = Math.min(100 * (2 ** Math.min(exitRetryAttempts, 4)), 2000);
+  exitRetryAttempts++;
+  exitRetryTimer = setTimeout(() => {
+    exitRetryTimer = null;
+    persistExitState();
+  }, delay);
+}
+
+// command 模式的直接子进程通常是 shell wrapper，manager 托管的是 discover 找到的后代。
+// 只有确认直接子进程就是受管目标（例如 Linux shell exec 后 pid 不变）时，才把它的
+// 退出结果写成目标 exit；否则单独写 wrapperExit，避免把 wrapper 的退出码/信号冒充目标。
+function isCommandWrapper(run) {
+  if (run?.kind !== 'command') return false;
+  // 目标尚未发现（pid 缺失）时 wrapper 的退出绝不能当成目标退出；只有记录中
+  // 有真实目标 pid、且目标与 wrapper 是同一进程（如 shell exec）时才算目标。
+  if (!Number.isInteger(run.pid) || run.pid <= 0) return true;
+  if (!Number.isInteger(run.wrapperPid) || run.wrapperPid <= 0) return true;
+  return run.pid !== run.wrapperPid;
+}
+
+function applyExitEvidence(run) {
+  if (!run || run.runId !== runId) return false;
+  if (isCommandWrapper(run)) run.wrapperExit = exitInfo;
+  else run.exit = exitInfo;
+  return true;
+}
+
+function persistExitState() {
+  if (!exitInfo || exitRecorded) return;
+  try {
+    withLogEvidenceLock(home, appId, 'log-exit', () => {
+      const rt = readRuntimeStrict(home, appId);
+      // 先匹配 current；目标退出后若 manager 已因 stdio 延迟/并发 start 把旧 run
+      // 归档到 prevRuns，则继续按 runId 写入历史条目，绝不改新 current。
+      let matched = applyExitEvidence(rt?.current);
+      if (!matched) {
+        const archived = (rt?.prevRuns ?? []).find((p) => p.runId === runId);
+        matched = applyExitEvidence(archived);
+      }
+      if (!matched) {
+        exitRecorded = true;
+        return;
+      }
+      atomicWriteJson(runtimeFile, rt);
+      exitRecorded = true;
+    });
+  } catch {
+    // 停止/启动持锁期间短暂 LOCK_BUSY：有界重试，拿到锁后按 runId 复核。
+    scheduleExitRetry();
+  }
 }
 
 const target = spawn(file, args, { cwd, env: process.env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -132,8 +192,20 @@ function forward(stream, isOut) {
 }
 forward(target.stdout, true);
 forward(target.stderr, false);
+// 退出证据必须在 'exit' 落账：'close' 要等 stdio 全部关闭，若目标派生的子进程继续
+// 持有 stdout/stderr 管道，会延迟到旧 run 已归档之后，导致证据丢失。
+// 日志 fd 仍在下面 'close' 时关闭，临终输出不丢。
+target.on('exit', (code, signal) => {
+  if (spawnFailed) return;
+  exitInfo = {
+    code: Number.isInteger(code) ? code : null,
+    signal: signal ?? null,
+    at: new Date().toISOString(),
+  };
+  persistExitState();
+});
 // 'close' 在进程终止且 stdio 管道全部关闭后才触发：退出瞬间管道里残余的数据
-// 都已在 'data' 回调写完，此时再关日志 fd 不会丢临终输出；'exit' 事件无此保证。
+// 都已在 'data' 回调写完，此时再关日志 fd 不会丢临终输出。
 target.on('close', (code, signal) => {
   persistRotationState();
   try { fs.closeSync(outFd); } catch {}

@@ -4,13 +4,14 @@
 # 注意：creationFileTime 超出 JS 安全整数范围，始终以字符串传递与序列化。
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'descendants', 'port')]
+  [ValidateSet('capture', 'verify', 'verify-batch', 'terminate', 'terminate-tree', 'grace', 'discover', 'wait-exit', 'descendants', 'port')]
   [string]$Action,
 
   [int]$Id = 0,
   [string]$CreationFileTime = '',
   [string]$Image = '',
   [int]$WaitMs = 10000,
+  [string]$ReadyFile = '',
   # verify-batch：UTF-8 JSON 数组的 base64，形如
   # [{ "id": 123, "creationFileTime": "...", "image": "..." }, ...]
   [string]$Json = ''
@@ -28,6 +29,8 @@ public static class ProcUtil {
   static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool GetProcessTimes(IntPtr h, out long creation, out long exit, out long kernel, out long user);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GetExitCodeProcess(IntPtr h, out uint exitCode);
   [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
   static extern bool QueryFullProcessImageName(IntPtr h, uint flags, StringBuilder buf, ref uint size);
   [DllImport("kernel32.dll", SetLastError = true)]
@@ -85,6 +88,31 @@ public static class ProcUtil {
       return Err("openFailed", err);
     }
     try { return VerifyOnHandle(h, creationFileTime, image); }
+    finally { CloseHandle(h); }
+  }
+
+  // 等待指定进程实例退出并返回其退出码（#102 command 模式目标）。
+  // 先核验 creationFileTime 再阻塞在同一句柄上，PID 复用不会让证据记到新进程。
+  public static string WaitExit(int pid, long creationFileTime, string readyFile) {
+    IntPtr h = OpenProcess(QUERY | SYNCHRONIZE, false, pid);
+    if (h == IntPtr.Zero) {
+      int err = Marshal.GetLastWin32Error();
+      if (err == ERROR_INVALID_PARAMETER) return "NOTFOUND";
+      return Err("openFailed", err);
+    }
+    try {
+      long c, e, k, u;
+      if (!GetProcessTimes(h, out c, out e, out k, out u)) return Err("timesFailed", Marshal.GetLastWin32Error());
+      if (c != creationFileTime) return "MISMATCH\tcreationTime";
+      // 先发出 ready：manager 等 watcher 真正拿到句柄后才返回启动成功，
+      // 避免目标在 pwsh 冷启动期间退出导致证据漏采。
+      if (!string.IsNullOrEmpty(readyFile)) { try { System.IO.File.WriteAllText(readyFile, "ready"); } catch { } }
+      uint w = WaitForSingleObject(h, 0xFFFFFFFF);
+      if (w != 0) return Err("waitFailed", (int)w);
+      uint code;
+      if (!GetExitCodeProcess(h, out code)) return Err("exitCodeFailed", Marshal.GetLastWin32Error());
+      return "OK\t" + code.ToString();
+    }
     finally { CloseHandle(h); }
   }
 
@@ -195,6 +223,10 @@ if (($Action -in 'verify', 'terminate', 'terminate-tree', 'grace') -and (($Id -l
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
 }
+if (($Action -eq 'wait-exit') -and (($Id -le 0) -or (-not $CreationFileTime))) {
+  [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
+  exit 0
+}
 if (($Action -in 'capture', 'descendants') -and ($Id -le 0)) {
   [pscustomobject]@{ result = 'error'; code = 'badArgs' } | ConvertTo-Json -Compress
   exit 0
@@ -278,15 +310,21 @@ if ($Action -eq 'discover') {
     }
     $byParent = @{}
     $wrapperAlive = $false
+    $rootRow = $null
     foreach ($p in $rows) {
       $pp = [int64]$p.ParentProcessId
-      if ([int64]$p.ProcessId -eq $Id) { $wrapperAlive = $true }
+      if ([int64]$p.ProcessId -eq $Id) { $wrapperAlive = $true; $rootRow = $p }
       if (-not $byParent.ContainsKey($pp)) { $byParent[$pp] = [System.Collections.ArrayList]@() }
       [void]$byParent[$pp].Add($p)
     }
     $queue = [System.Collections.ArrayList]@([int64]$Id)
     $seen = @{}
     $found = @()
+    # 锚点自身也参与映像匹配：Linux /bin/sh 可能 exec 成真实目标（pid 不变），
+    # 此时目标不是自己的后代，仅按后代枚举会错过。
+    if ($rootRow -and $rootRow.ExecutablePath -and ([IO.Path]::GetFileName([string]$rootRow.ExecutablePath) -ieq $Image)) {
+      $found += [pscustomobject]@{ pid = [int64]$rootRow.ProcessId; image = [string]$rootRow.ExecutablePath; creationFileTime = [string]$rootRow.CreationDate.ToFileTime(); cmd = '' }
+    }
     while ($queue.Count -gt 0) {
       $cur = $queue[0]; $queue.RemoveAt(0)
       $kids = $byParent[[int64]$cur]
@@ -349,6 +387,24 @@ if ($Action -eq 'discover') {
     }
     Start-Sleep -Milliseconds 400
   }
+}
+
+# wait-exit：阻塞等待已验证的受管目标退出并返回退出码（#102 command 模式）。
+# 句柄在核验后一直持有，PID 复用不会把证据记到新进程；signal 在 Windows 无对应语义。
+if ($Action -eq 'wait-exit') {
+  $raw = [ProcUtil]::WaitExit([int]$Id, [long]$CreationFileTime, [string]$ReadyFile)
+  $parts = $raw -split "`t"
+  switch ($parts[0]) {
+    'OK' { [pscustomobject]@{ result = 'exited'; code = [int]$parts[1]; signal = $null } | ConvertTo-Json -Compress }
+    'NOTFOUND' { [pscustomobject]@{ result = 'notfound' } | ConvertTo-Json -Compress }
+    'MISMATCH' { [pscustomobject]@{ result = 'mismatch'; field = [string]$parts[1] } | ConvertTo-Json -Compress }
+    default {
+      $w = $null
+      if ($parts.Length -gt 2) { $w = [int]$parts[2] }
+      [pscustomobject]@{ result = 'error'; code = [string]$parts[1]; win32 = $w } | ConvertTo-Json -Compress
+    }
+  }
+  exit 0
 }
 
 # terminate-tree 的后代枚举：Win32_Process 按 ParentProcessId BFS。

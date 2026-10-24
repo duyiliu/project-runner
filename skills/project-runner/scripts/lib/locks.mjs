@@ -36,7 +36,7 @@ function placeholderAlive(holder) {
   return true;
 }
 
-function acquireLock(home, name, op) {
+function acquireLock(home, name, op, { light = false } = {}) {
   const file = lockPath(home, name);
   for (let attempt = 0; attempt < 2; attempt++) {
     let fd;
@@ -56,7 +56,7 @@ function acquireLock(home, name, op) {
         if (e3.code === 'PWSH_MISSING' || e3.code === 'LOCK_CORRUPT' || e3.code === 'IDENTITY_UNAVAILABLE') throw e3;
         alive = true; // 权限等未知情形：保守视为存活，拒绝回收
       }
-      if (alive) throw conflictError('LOCK_BUSY', `另一操作进行中（${holder.op ?? '?'}，pid=${holder.pid}），拒绝并发执行`);
+      if (alive) throw conflictError('LOCK_BUSY', `另一操作进行中（${holder.op ?? '?'}，pid=${holder.pid}），拒绝并发执行`, { pid: holder.pid, op: holder.op ?? null });
       try {
         fs.renameSync(file, `${file}.stale-${Date.now()}`); // 回收死锁，保留现场
       } catch (e4) {
@@ -66,13 +66,20 @@ function acquireLock(home, name, op) {
     }
     let wrote = false;
     try {
-      // 先写占位持有者再补全身份：selfIdentityCapture 可能耗时数百毫秒，
-      // 期间并发读方看到的是可重试的占位内容而不是空文件（#22）。
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
-      const me = selfIdentityCapture();
-      fs.ftruncateSync(fd, 0);
-      fs.writeSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 0, 'utf8');
-      wrote = true;
+      if (light) {
+        // 内部日志证据写（log-writer）只持有极短时间，不触发 selfIdentityCapture
+        // 的 pwsh 冷启动；占位持有者（pid-only）已足够让并发读方做出正确判断。
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
+        wrote = true;
+      } else {
+        // 先写占位持有者再补全身份：selfIdentityCapture 可能耗时数百毫秒，
+        // 期间并发读方看到的是可重试的占位内容而不是空文件（#22）。
+        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, op, at: new Date().toISOString() }) + '\n', 'utf8');
+        const me = selfIdentityCapture();
+        fs.ftruncateSync(fd, 0);
+        fs.writeSync(fd, JSON.stringify({ pid: process.pid, creationFileTime: me.creationFileTime, op, at: new Date().toISOString() }) + '\n', 0, 'utf8');
+        wrote = true;
+      }
     } finally {
       try { fs.closeSync(fd); } catch { /* 忽略 */ }
       if (!wrote) {
@@ -89,7 +96,7 @@ function acquireLock(home, name, op) {
 }
 
 export function withLock(home, name, op, fn) {
-  const release = acquireLock(home, name, op);
+  const release = acquireLockWithEvidenceRetry(home, name, op);
   try {
     return fn();
   } finally {
@@ -99,12 +106,39 @@ export function withLock(home, name, op, fn) {
 
 // 异步版 withLock：fn 返回 Promise 时锁一直保持到其 settle（用于异步 launch 阶段）。
 export async function withLockAsync(home, name, op, fn) {
-  const release = acquireLock(home, name, op);
+  const release = acquireLockWithEvidenceRetry(home, name, op);
   try {
     return await fn();
   } finally {
     release();
   }
+}
+
+// log-writer 专用轻量锁：只写 pid-only 持有者，不做 pwsh 身份采集。
+// 仅用于日志轮转/退出证据这类毫秒级内部写；生命周期操作仍用 withLock 的完整身份。
+export function withLogEvidenceLock(home, name, op, fn) {
+  const release = acquireLockWithEvidenceRetry(home, name, op, { light: true });
+  try {
+    return fn();
+  } finally {
+    release();
+  }
+}
+
+// log-writer 每次写完日志轮转/退出证据都可能持有应用锁（Windows 首次建锁需自证身份，
+// 可能持续数百毫秒）。这类内部短写不应让用户的 start/stop 偶发 LOCK_BUSY：
+// 仅当当前持有者确为 log-* 内部操作时做有界短重试；真实并发启停仍按原语义拒绝。
+function acquireLockWithEvidenceRetry(home, name, op, options = {}) {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      return acquireLock(home, name, op, options);
+    } catch (e) {
+      const internal = e.code === 'LOCK_BUSY' && typeof e.detail?.op === 'string' && e.detail.op.startsWith('log-');
+      if (!internal || attempt === 59) throw e;
+      sleepSync(50);
+    }
+  }
+  throw conflictError('LOCK_BUSY', '锁竞争失败');
 }
 
 // 注册表全局短时锁：任何 readRegistry→修改→atomicWriteJson 序列都必须在其中执行，
