@@ -2,6 +2,7 @@
 // manager ui 日志源"跟随当前批次"测试：真实 ui server + node:vm 沙箱执行页面内嵌脚本（轻量 DOM 桩）。
 // 覆盖：重启产生新批次后自动切到新当前源（保留 stdout/stderr 流偏好）；
 //       刻意选择的历史批次/.tmp 源不被抢切；旧会话无标志位的 run: 记忆按跟随处理。
+//       403（fatal）后各轮询入口停止发请求；loadSources 成功时清除残留横幅。
 // 用法：node scripts/test/ui-src-follow.mjs [index.html 路径]（无外部依赖，Node 22+）
 import fs from 'node:fs';
 import path from 'node:path';
@@ -259,6 +260,38 @@ try {
     assert(buttons.every((b) => b.disabled), '执行期间其余按钮应全部禁用');
     run(`lifecycleBusy = false; lifecycleOpKey = null;`);
     await run('loadStatus()');
+  });
+
+  await check('loadSources 成功加载时清除残留横幅', async () => {
+    run(`showBanner('残留横幅')`);
+    assert.equal(run(`$('#fatalBanner').hidden`), false, '前置横幅应可见');
+    await run('loadSources()');
+    assert.equal(run(`$('#fatalBanner').hidden`), true, '成功加载后横幅应隐藏');
+  });
+
+  await check('403 后各轮询入口均不再发请求', async () => {
+    const realFetch = ctx.fetch;
+    let calls = 0;
+    ctx.fetch = () => {
+      calls++;
+      return Promise.resolve({
+        ok: false,
+        status: 403,
+        json: async () => ({ ok: false, error: { code: 'HOST_FORBIDDEN', message: '访问被拒绝（403）' } }),
+      });
+    };
+    try {
+      await run('loadSources()'); // 由真实轮询入口触发 403，使 fatal 生效
+      assert.equal(run('fatal'), true, 'loadSources 收到 403 后应置 fatal');
+      await wait(100); // 等待替换 fetch 前已发出的请求落地
+      calls = 0;
+      await run('Promise.all([loadApps(), loadStatus(), loadSources(), pollTail(), manualReload()])');
+      await wait(1200); // 覆盖 pollTail 的 1s 定时器
+      assert.equal(calls, 0, `fatal 后仍发出了 ${calls} 次轮询请求`);
+    } finally {
+      ctx.fetch = realFetch;
+      run('fatal = false');
+    }
   });
 } finally {
   child.kill();
